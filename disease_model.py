@@ -11,16 +11,14 @@ model repository.
 """
 
 from PIL import Image
-from transformers import AutoModelForImageClassification
+from transformers import AutoImageProcessor, AutoModelForImageClassification
+import os
 import re
 import torch
 import torch.nn.functional as F
 
-MODEL_NAME = "linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification"
-
-IMAGE_SIZE = 224
-IMAGE_MEAN = torch.tensor([0.5, 0.5, 0.5]).view(3, 1, 1)
-IMAGE_STD = torch.tensor([0.5, 0.5, 0.5]).view(3, 1, 1)
+DEFAULT_MODEL_NAME = "linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification"
+MODEL_NAME = os.environ.get("TERRASENSE_DISEASE_MODEL", DEFAULT_MODEL_NAME).strip() or DEFAULT_MODEL_NAME
 
 
 def load_model(local_files_only: bool = False):
@@ -30,65 +28,29 @@ def load_model(local_files_only: bool = False):
     Returns:
         model
     """
+    processor = AutoImageProcessor.from_pretrained(
+        MODEL_NAME,
+        local_files_only=local_files_only,
+    )
     model = AutoModelForImageClassification.from_pretrained(
         MODEL_NAME,
         local_files_only=local_files_only,
     )
     model.eval()
+    # Keep the exact model-specific resize/crop/normalization settings with the model.
+    model.terrasense_image_processor = processor
 
     return model
 
 
-def _preprocess(image: Image.Image) -> torch.Tensor:
+def _preprocess(image: Image.Image, processor) -> torch.Tensor:
     """
-    Convert a PIL image into the tensor expected by the model.
-
-    The original model uses:
-      - RGB
-      - resize
-      - center crop
-      - scale 0-255 -> 0-1
-      - mean/std normalization of 0.5
+    Apply the image processor published alongside this model.
     """
-
-    image = image.convert("RGB")
-
-    # Resize while keeping the aspect ratio.
-    image.thumbnail((256, 256), Image.Resampling.BILINEAR)
-
-    # Put the image on a 256x256 canvas.
-    canvas = Image.new("RGB", (256, 256))
-    left = (256 - image.width) // 2
-    top = (256 - image.height) // 2
-    canvas.paste(image, (left, top))
-
-    # Center crop to 224x224.
-    left = (256 - IMAGE_SIZE) // 2
-    top = (256 - IMAGE_SIZE) // 2
-
-    image = canvas.crop(
-        (
-            left,
-            top,
-            left + IMAGE_SIZE,
-            top + IMAGE_SIZE,
-        )
-    )
-
-    # PIL -> torch tensor.
-    # Shape: H,W,C -> C,H,W
-    pixels = torch.tensor(
-        list(image.getdata()),
-        dtype=torch.float32,
-    ).reshape(IMAGE_SIZE, IMAGE_SIZE, 3)
-
-    tensor = pixels.permute(2, 0, 1) / 255.0
-
-    # Normalize using the model's expected values.
-    tensor = (tensor - IMAGE_MEAN) / IMAGE_STD
-
-    # Add batch dimension.
-    return tensor.unsqueeze(0)
+    if processor is None:
+        raise RuntimeError("The image processor for the selected disease model is unavailable.")
+    encoded = processor(images=image.convert("RGB"), return_tensors="pt")
+    return encoded["pixel_values"]
 
 
 def _crop_match_key(plant: str) -> tuple[str, ...]:
@@ -133,13 +95,15 @@ def predict(image: Image.Image, model, top_k: int = 3, plant_filter: str | None 
         raw label and confidence.
     """
 
-    inputs = _preprocess(image)
+    processor = getattr(model, "terrasense_image_processor", None)
+    inputs = _preprocess(image, processor)
 
     with torch.no_grad():
         outputs = model(pixel_values=inputs)
 
     logits = outputs.logits[0]
     class_labels = _class_labels(model)
+    all_probabilities = F.softmax(logits, dim=-1)
     class_indices = list(range(len(class_labels)))
 
     if plant_filter:
@@ -150,9 +114,12 @@ def predict(image: Image.Image, model, top_k: int = 3, plant_filter: str | None 
         ]
         if not class_indices:
             raise ValueError(f"The model has no trained labels for {plant_filter}.")
-        logits = logits[class_indices]
-
-    probabilities = F.softmax(logits, dim=-1)
+        # Keep the probabilities normalized across every trained class. Re-softmaxing
+        # only the selected crop's logits can turn a weak, wrong-crop guess into a
+        # misleading 100% "Healthy" result.
+        probabilities = all_probabilities[class_indices]
+    else:
+        probabilities = all_probabilities
 
     k = min(top_k, probabilities.shape[0])
 

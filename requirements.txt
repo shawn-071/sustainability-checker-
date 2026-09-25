@@ -3,6 +3,5 @@ folium
 streamlit-folium
 requests
 pillow
-qrcode[pil]
 transformers==4.57.1
 torch

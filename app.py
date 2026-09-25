@@ -1,7 +1,5 @@
 import html
-import io
 import json
-import os
 import textwrap
 from pathlib import Path
 
@@ -13,7 +11,6 @@ from branca.element import MacroElement
 from streamlit_folium import st_folium
 from PIL import Image
 from jinja2 import Template
-import qrcode
 
 from crop_data import (
     CROP_THRESHOLDS,
@@ -41,6 +38,8 @@ from polyculture import recommendations
 
 APP_DIR = Path(__file__).resolve().parent
 LOGO_PATH = APP_DIR / "assets" / "terrasense-logo.png"
+QR_PATH = APP_DIR / "assets" / "terrasense-app-qr.png"
+PUBLIC_APP_URL = "https://sustainability-checker.streamlit.app/"
 
 st.set_page_config(
     page_title="Terrasense | Field planning companion",
@@ -432,30 +431,33 @@ def cached_disease_model(offline):
     return load_model(local_files_only=offline)
 
 
-def render_voice_button(message):
-    language = {"en": "en-US", "ar": "ar-SA", "zh": "zh-CN", "fr": "fr-FR", "ru": "ru-RU", "es": "es-ES"}.get(st.session_state.language, "en-US")
+def render_voice_button(message, language=None):
+    language = language or st.session_state.language
+    language_tag = {"en": "en-US", "ar": "ar-SA", "zh": "zh-CN", "fr": "fr-FR", "ru": "ru-RU", "es": "es-ES"}.get(language, "en-US")
     safe_message = json.dumps(message, ensure_ascii=False).replace("</", "<\\/")
+    safe_language = json.dumps(language_tag)
+    idle_label = json.dumps(tr("read_aloud", language), ensure_ascii=False)
+    playing_label = json.dumps(tr("stop_reading", language), ensure_ascii=False)
+    unavailable_label = json.dumps(tr("voice_unavailable", language), ensure_ascii=False)
     components.html(
-        f"""<button type="button" aria-label="Read guidance aloud" aria-pressed="false" style="
+        f"""<button type="button" aria-label={idle_label} aria-pressed="false" style="
             background:#174d38;color:white;border:0;border-radius:8px;
             padding:10px 16px;font-size:15px;font-weight:600;cursor:pointer">
-            Read this guidance aloud
+            {tr("read_aloud", language)}
         </button>
         <script>
         const button = document.currentScript.previousElementSibling;
         let activeUtterance = null;
         let isPlaying = false;
-        const idleLabel = 'Read this guidance aloud';
-        const playingLabel = 'Stop reading';
         function setPlaying(value) {{
           isPlaying = value;
-          button.textContent = value ? playingLabel : idleLabel;
-          button.setAttribute('aria-label', value ? playingLabel : idleLabel);
+          button.textContent = value ? {playing_label} : {idle_label};
+          button.setAttribute('aria-label', value ? {playing_label} : {idle_label});
           button.setAttribute('aria-pressed', value ? 'true' : 'false');
         }}
         button.addEventListener('click', () => {{
           if (!('speechSynthesis' in window) || !('SpeechSynthesisUtterance' in window)) {{
-            button.textContent = 'Voice playback is unavailable';
+            button.textContent = {unavailable_label};
             return;
           }}
           if (isPlaying) {{
@@ -467,11 +469,69 @@ def render_voice_button(message):
           window.speechSynthesis.cancel();
           const utterance = new SpeechSynthesisUtterance({safe_message});
           activeUtterance = utterance;
-          utterance.lang = '{language}';
+          utterance.lang = {safe_language};
+          const wantedLanguage = utterance.lang.toLowerCase();
+          const languagePrefix = wantedLanguage.split('-')[0];
+          const voices = window.speechSynthesis.getVoices();
+          utterance.voice = voices.find(voice => voice.lang.toLowerCase() === wantedLanguage)
+            || voices.find(voice => voice.lang.toLowerCase().startsWith(languagePrefix + '-'))
+            || null;
           utterance.onend = () => {{ if (activeUtterance === utterance) setPlaying(false); }};
           utterance.onerror = () => {{ if (activeUtterance === utterance) setPlaying(false); }};
           setPlaying(true);
           window.speechSynthesis.speak(utterance);
+        }});
+        </script>""",
+        height=54,
+    )
+
+
+def render_copy_link_button(url, language):
+    """Render a browser-side copy button without exposing the URL as an editable field."""
+    safe_url = json.dumps(url, ensure_ascii=False).replace("</", "<\\/")
+    copy_label = json.dumps(tr("copy_link", language), ensure_ascii=False)
+    copied_label = json.dumps(tr("link_copied", language), ensure_ascii=False)
+    failed_label = json.dumps(tr("copy_failed", language), ensure_ascii=False)
+    components.html(
+        f"""<button id="copyTerrasenseLink" type="button" style="
+            background:#176b4d;color:white;border:0;border-radius:8px;
+            padding:10px 16px;font-size:15px;font-weight:600;cursor:pointer">
+            {tr("copy_link", language)}
+        </button>
+        <span id="copyTerrasenseStatus" role="status" aria-live="polite" style="margin-left:10px"></span>
+        <script>
+        const copyButton = document.getElementById('copyTerrasenseLink');
+        const copyStatus = document.getElementById('copyTerrasenseStatus');
+        copyButton.addEventListener('click', async () => {{
+          let copied = false;
+          try {{
+            await navigator.clipboard.writeText({safe_url});
+            copied = true;
+          }} catch (error) {{
+            try {{
+              const field = document.createElement('textarea');
+              field.value = {safe_url};
+              field.setAttribute('readonly', '');
+              field.style.position = 'fixed';
+              field.style.opacity = '0';
+              document.body.appendChild(field);
+              field.select();
+              copied = document.execCommand('copy');
+              field.remove();
+            }} catch (fallbackError) {{
+              copied = false;
+            }}
+          }}
+          if (!copied) {{
+            copyStatus.textContent = {failed_label};
+            return;
+          }}
+          copyButton.textContent = {copied_label};
+          copyStatus.textContent = {copied_label};
+          window.setTimeout(() => {{
+            copyButton.textContent = {copy_label};
+            copyStatus.textContent = '';
+          }}, 2200);
         }});
         </script>""",
         height=54,
@@ -1569,7 +1629,7 @@ elif st.session_state.page == "doctor":
 
             if disease != "Unknown" and plant != "Unknown crop":
                 st.metric("Model class score", f"{confidence * 100:.1f}%")
-                st.caption("This score is the model's class match, not diagnostic certainty. Crop-specific scores are compared only within that crop's trained labels.")
+                st.caption("This is the model's probability across all trained classes, not diagnostic certainty. The displayed candidates are limited to your selected crop.")
 
             st.subheader(tr("treatment_title", language))
             if disease == "Unknown":
@@ -1632,29 +1692,13 @@ elif st.session_state.page == "history":
 elif st.session_state.page == "share":
 
     st.subheader(tr("share_title", language))
-    st.write("Create a QR code for a public Terrasense deployment. QR generation happens locally in this app.")
-    public_url = st.text_input(
-        tr("public_url", language),
-        value=os.environ.get("APP_PUBLIC_URL", ""),
-        placeholder="https://your-app.streamlit.app",
-    ).strip()
-    if public_url:
-        from urllib.parse import urlparse
-
-        parsed_url = urlparse(public_url)
-        if parsed_url.scheme != "https" or not parsed_url.netloc:
-            st.error("Enter a complete HTTPS URL for the deployed app.")
-        else:
-            qr_image = qrcode.make(public_url)
-            qr_buffer = io.BytesIO()
-            qr_image.save(qr_buffer, format="PNG")
-            qr_bytes = qr_buffer.getvalue()
-            st.image(qr_bytes, caption=tr("scan_qr", language), width=240)
-            st.download_button(tr("download_qr", language), qr_bytes, file_name="terrasense-app-qr.png", mime="image/png")
+    st.write(tr("share_instructions", language))
+    if QR_PATH.is_file():
+        st.image(str(QR_PATH), caption=tr("scan_qr", language), width=240)
     else:
-        st.info(tr("qr_missing", language))
-    share_voice = tr("share_title", language) + ". " + tr("public_url", language) + ". "
-    share_voice += public_url if public_url else tr("qr_missing", language)
+        st.info(tr("scan_qr", language))
+    render_copy_link_button(PUBLIC_APP_URL, language)
+    share_voice = tr("share_title", language) + ". " + tr("share_instructions", language)
     render_voice_button(share_voice)
 
 elif st.session_state.page == "impact":

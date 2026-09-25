@@ -14,7 +14,7 @@ Built for Reboot the Earth 2026, Challenge 1, Team 17.
 - Optional account registration, salted password hashes, local activity history, and cached point data.
 - Voice readout using the browser’s speech support.
 - Core navigation and guidance in Arabic, Chinese, English, French, Russian, and Spanish.
-- Local QR-code generation for a configured public deployment URL.
+- A fixed Share-page QR code and a button to copy the public app link.
 - Draft privacy and terms copy, plus relevant UN Sustainable Development Goals.
 
 The app is a decision-support prototype. Its crop screen does not predict yield, and its leaf model does not provide a confirmed diagnosis or replace local agricultural advice.
@@ -31,11 +31,22 @@ The app is a decision-support prototype. Its crop screen does not predict yield,
    streamlit run app.py
    ```
 
-The first online leaf screening downloads the open-source model. Once the model is present in the local Hugging Face cache, Offline mode can use it without downloading files. The model card describes 38 PlantVillage classes; the app checks the selected crop against those labels and does not force a result for an unsupported crop. Its displayed class score is not diagnostic certainty. See the [model card](https://huggingface.co/linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification).
+The first online leaf screening downloads the open-source model and its matching image processor. Once both are present in the local Hugging Face cache, Offline mode can use them without downloading files. The model card describes 38 PlantVillage classes; the app checks the selected crop against those labels and does not force a result for an unsupported crop. Its displayed class score is not diagnostic certainty. See the [model card](https://huggingface.co/linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification).
+
+### Optional PlantExpertVQA fine-tuning
+
+PlantExpertVQA can be used to train a crop-and-disease model without putting its images in the app or GitHub. Its Hugging Face repository lists a **CC BY-NC 4.0** license, so use this path only for non-commercial work and preserve the required attribution. The dataset is large; do not download its full archive.
+
+1. In a separate training environment with enough temporary storage, install `requirements-training.txt`.
+2. Run `python train_plantexpert.py`. By default it streams up to 120,000 dataset rows, keeps up to 25 unique images for each crop-condition class, and writes the sample and output model under `plantexpert-training/` (ignored by Git).
+3. Review the held-out accuracy printed by the script. This small-sample check is not proof of field reliability. Keep the current model if the result is weak.
+4. If the model is useful, upload only the generated `plantexpert-training/model/` files to a Hugging Face model repository, then set the Streamlit secret `TERRASENSE_DISEASE_MODEL` to that repository ID. The app loads the selected model and its saved image processor. Leave the secret unset to use the current model.
+
+Streaming avoids intentionally downloading the full dataset archive, but the amount fetched can depend on how Hugging Face stores and serves its Parquet files. Training is separate from deployment; the app receives only the resulting model files.
 
 ## Configuration
 
-- `APP_PUBLIC_URL`: optional HTTPS URL used to prefill the Share app page before generating a QR code.
+- `TERRASENSE_DISEASE_MODEL`: optional Hugging Face model ID or local model directory. Leave unset to use the default PlantVillage model.
 - `TERRASENSE_DB_PATH`: optional path for the SQLite database. By default, the app creates `terrasense.db` beside `app.py`. Existing `cropwise.db` files and the older `CROPWISE_DB_PATH` setting remain recognized so saved local history can continue to work.
 
 The database stores usernames, salted password hashes, saved history, and cached field values. Uploaded leaf images are not written to the database. A hosted installation needs persistent, access-controlled storage for durable account history. Treat the local account flow as a prototype until production security, backups, password recovery, and retention policies are reviewed.
@@ -48,7 +59,8 @@ The app needs no paid API key. It uses:
 - [SoilGrids / ISRIC](https://soilgrids.org/) for soil pH estimates.
 - [OpenStreetMap](https://www.openstreetmap.org/copyright) map tiles.
 - [Open-Meteo Elevation API](https://open-meteo.com/en/docs/elevation-api) using the Copernicus GLO-90 elevation model.
-- [PlantVillage](https://huggingface.co/datasets) labels and a MobileNetV2 model hosted on Hugging Face.
+- PlantVillage labels and a MobileNetV2 model hosted on Hugging Face.
+- [PlantExpertVQA](https://huggingface.co/datasets/Project-AgML/PlantExpertVQA) as an optional non-commercial fine-tuning source.
 
 Live map tiles and climate, soil, and elevation refreshes require an internet connection. Offline mode uses saved values for an exact coordinate or values entered by the user. The offline map has no basemap. A fully disconnected first-time setup requires preloading the model and any field data the user needs. Open-Meteo and each data provider’s terms and attribution requirements apply; confirm them before commercial deployment.
 

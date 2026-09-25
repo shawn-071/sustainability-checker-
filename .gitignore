@@ -10,3 +10,5 @@ cropwise.db-wal
 .venv/
 venv/
 .streamlit/secrets.toml
+plantexpert-training/
+trained_plantexpert_model/
