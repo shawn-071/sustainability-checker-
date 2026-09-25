@@ -123,15 +123,6 @@ def score_percent(score):
         return 0
 
 
-def verdict_icon(verdict):
-    return {
-        "Suitable": "🟢",
-        "Marginal": "🟡",
-        "Not suitable": "🔴",
-        "Unknown": "⚪",
-    }.get(verdict, "⚪")
-
-
 def factor_status(score):
     if score is None:
         return "Unavailable"
@@ -143,6 +134,62 @@ def factor_status(score):
         return "Moderate"
 
     return "Poor"
+
+
+def field_result_summary(crop, verdict, score, factors=None):
+    """Turn the screening result into a short, farmer-facing explanation."""
+    if verdict == "Unknown":
+        return (
+            f"There is not enough climate or soil information to assess {crop}. "
+            "Add local values or reconnect to refresh the field data, then try again."
+        )
+
+    score_text = f" The screening score is {score_percent(score)}%." if score is not None else ""
+
+    if verdict == "Suitable":
+        return (
+            f"The available climate and soil indicators are broadly within the "
+            f"screening ranges for {crop}.{score_text} Check local planting dates, "
+            "water access, and field conditions before making a planting decision."
+        )
+
+    if verdict == "Marginal":
+        review_factors = [
+            name.lower()
+            for name, factor in (factors or {}).items()
+            if factor.get("score") is not None and factor["score"] < 0.8
+        ]
+        review_text = (
+            "Review " + ", ".join(review_factors) + " against local conditions. "
+            if review_factors
+            else "Review the factor breakdown against local conditions. "
+        )
+        return (
+            f"Some available conditions fit {crop}, while others are outside its "
+            f"preferred ranges.{score_text} {review_text}Local advice can help "
+            "determine whether the crop is practical for this field."
+        )
+
+    return (
+        f"The available field indicators are outside the screening ranges for "
+        f"{crop}.{score_text} Consider comparing other crops and confirm the "
+        "location and data before deciding."
+    )
+
+
+def leaf_result_summary(plant, disease, match_score):
+    """Describe the model's leading label in plain language and set expectations."""
+    score_text = f" The model match score is {match_score * 100:.1f}%."
+    if disease == "Healthy":
+        return (
+            f"The image model's leading match is a healthy-looking {plant} leaf."
+            f"{score_text} Keep monitoring the plant; this screen cannot rule out disease."
+        )
+    return (
+        f"The image model's leading match is {disease} on {plant}.{score_text} "
+        "This is an automated visual screening, not a confirmed diagnosis. "
+        "Use the first steps below and ask local agricultural support to confirm the cause."
+    )
 
 
 def format_factor_value(value, unit):
@@ -239,7 +286,7 @@ def render_voice_button(message):
         f"""<button type="button" aria-label="Read guidance aloud" style="
             background:#174d38;color:white;border:0;border-radius:999px;
             padding:10px 16px;font-size:15px;cursor:pointer">
-            🔊 Read this guidance
+            Read this guidance aloud
         </button>
         <script>
         const button = document.currentScript.previousElementSibling;
@@ -508,13 +555,13 @@ st.markdown(
 
 feature_columns = st.columns(3)
 feature_copy = [
-    ("📍", "map", "map_intro"),
-    ("🌿", "planner", "planner_intro"),
-    ("🩺", "doctor", "doctor_intro"),
+    ("map", "map_intro"),
+    ("planner", "planner_intro"),
+    ("doctor", "doctor_intro"),
 ]
-for column, (icon, title_key, description_key) in zip(feature_columns, feature_copy):
+for column, (title_key, description_key) in zip(feature_columns, feature_copy):
     with column:
-        st.markdown(f"#### {icon} {tr(title_key, language)}")
+        st.markdown(f"#### {tr(title_key, language)}")
         st.caption(tr(description_key, language))
 render_voice_button(". ".join(tr(key, language) for key in ("problem", "map_intro", "planner_intro", "doctor_intro")))
 
@@ -555,7 +602,7 @@ if st.session_state.page == "map":
 
     with col1:
 
-        st.markdown("#### 📍 Select a location")
+        st.markdown("#### Select a location")
 
         m = folium.Map(
             location=[
@@ -722,7 +769,7 @@ if st.session_state.page == "map":
             )
 
         reset = st.button(
-            "↩️ Reset location",
+            "Reset location",
             use_container_width=True,
         )
 
@@ -746,7 +793,7 @@ if st.session_state.page == "map":
 
     st.divider()
 
-    st.subheader(f"🌾 {tr('select_crop', language)}")
+    st.subheader(tr("select_crop", language))
 
     crop_names = sorted(CROP_THRESHOLDS.keys())
 
@@ -767,8 +814,7 @@ if st.session_state.page == "map":
     if selected_crop == "Select a crop...":
 
         st.info(
-            "🌱 Select a crop to view its preferred conditions "
-            "and analyze this location."
+            "Select a crop to view its preferred conditions and analyze this location."
         )
 
     # ========================================================
@@ -816,7 +862,7 @@ if st.session_state.page == "map":
         # ====================================================
 
         if st.button(
-            f"🔎 {tr('analyze', language)}",
+            tr("analyze", language),
             type="primary",
             use_container_width=True,
         ):
@@ -872,10 +918,12 @@ if st.session_state.page == "map":
                         details={"data_mode": data_mode},
                     )
 
-                except Exception as exc:
+                except Exception:
 
                     st.error(
-                        f"Unable to analyze this location: {exc}"
+                        "We couldn't assess this location. Check the coordinates and "
+                        "field values, then try again. If you are offline, use saved "
+                        "data or enter local values."
                     )
 
     # ========================================================
@@ -911,7 +959,7 @@ if st.session_state.page == "map":
             f"""
             <div class="{box_class}">
                 <h2 style="margin:0;">
-                    {verdict_icon(verdict)} {safe_text(verdict)}
+                    {safe_text(verdict)}
                 </h2>
 
                 <p style="
@@ -927,6 +975,16 @@ if st.session_state.page == "map":
             </div>
             """,
             unsafe_allow_html=True,
+        )
+
+        st.subheader("Plain-language summary")
+        st.write(
+            field_result_summary(
+                analysis["crop"],
+                verdict,
+                score,
+                analysis.get("factors"),
+            )
         )
 
         st.markdown("")
@@ -945,7 +1003,7 @@ if st.session_state.page == "map":
                 <div class="metric-card">
 
                     <div class="metric-title">
-                        🌡️ Average Temperature
+                        Average temperature
                     </div>
 
                     <div class="metric-value">
@@ -970,7 +1028,7 @@ if st.session_state.page == "map":
                 <div class="metric-card">
 
                     <div class="metric-title">
-                        🌧️ Annual Rainfall
+                        Annual rainfall
                     </div>
 
                     <div class="metric-value">
@@ -995,7 +1053,7 @@ if st.session_state.page == "map":
                 <div class="metric-card">
 
                     <div class="metric-title">
-                        🧪 Soil pH
+                        Soil pH
                     </div>
 
                     <div class="metric-value">
@@ -1023,7 +1081,7 @@ if st.session_state.page == "map":
 
         st.markdown("")
 
-        st.subheader("📊 Factor breakdown")
+        st.subheader("Factor breakdown")
 
         for factor_name, factor in analysis["factors"].items():
 
@@ -1085,7 +1143,7 @@ if st.session_state.page == "map":
                 unsafe_allow_html=True,
             )
 
-        st.subheader("💡 Why this result?")
+        st.subheader("Why this result")
 
         for reason in analysis["reasons"]:
             st.write("•", reason)
@@ -1106,7 +1164,7 @@ if st.session_state.page == "map":
 
 elif st.session_state.page == "planner":
 
-    st.subheader(f"🌿 {tr('planner_title', language)}")
+    st.subheader(tr("planner_title", language))
 
     st.write(tr("planner_intro", language))
     st.caption("Start with a field assessment to compare suitable crops, then build a companion plan from the screened pairings.")
@@ -1138,7 +1196,7 @@ elif st.session_state.page == "planner":
         )
 
     if st.button(
-        f"🌱 {tr('find_crops', language)}",
+        tr("find_crops", language),
         type="primary",
         use_container_width=True,
     ):
@@ -1209,10 +1267,12 @@ elif st.session_state.page == "planner":
                     details={"data_mode": data_mode},
                 )
 
-            except Exception as exc:
+            except Exception:
 
                 st.error(
-                    f"Unable to analyze this location: {exc}"
+                    "We couldn't assess this location. Check the coordinates and "
+                    "field values, then try again. If you are offline, use saved "
+                    "data or enter local values."
                 )
 
     finder = st.session_state.get("crop_results")
@@ -1225,7 +1285,16 @@ elif st.session_state.page == "planner":
 
             st.divider()
 
-            st.subheader("🌿 Matching crops")
+            best_result = results[0]
+            st.subheader("Plain-language summary")
+            st.write(
+                field_result_summary(
+                    best_result["crop"],
+                    best_result["verdict"],
+                    best_result["score"],
+                )
+            )
+            st.subheader("Matching crops")
 
             for result in results[:12]:
 
@@ -1251,8 +1320,6 @@ elif st.session_state.page == "planner":
 
                                 <div class="factor-detail">
 
-                                    {verdict_icon(result["verdict"])}
-
                                     {safe_text(result["verdict"])}
 
                                 </div>
@@ -1275,7 +1342,7 @@ elif st.session_state.page == "planner":
                 )
 
             st.divider()
-            st.subheader("🌱 Companion planting plan")
+            st.subheader("Companion planting plan")
             main_crop = st.selectbox(
                 "Choose the main crop for the companion plan",
                 sorted(CROP_THRESHOLDS.keys()),
@@ -1308,7 +1375,7 @@ elif st.session_state.page == "planner":
 
 elif st.session_state.page == "doctor":
 
-    st.subheader(f"🩺 {tr('doctor_title', language)}")
+    st.subheader(tr("doctor_title", language))
 
     st.write(tr("doctor_intro", language))
     st.warning(tr("screening_warning", language))
@@ -1337,7 +1404,7 @@ elif st.session_state.page == "doctor":
             )
 
             if st.button(
-                f"🔬 {tr('analyze_leaf', language)}",
+                tr("analyze_leaf", language),
                 type="primary",
                 use_container_width=True,
             ):
@@ -1366,17 +1433,20 @@ elif st.session_state.page == "doctor":
                             details={"image_saved": False},
                         )
 
-                    except Exception as exc:
+                    except Exception:
 
                         if st.session_state.offline_mode:
                             st.error("The model is not cached for offline use yet. Connect once, run a screening, and then retry offline.")
                         else:
-                            st.error(f"Disease model error: {exc}")
+                            st.error(
+                                "Leaf screening couldn't run. Try again later. If you "
+                                "are offline, connect once to download the model, then retry."
+                            )
 
-        except Exception as exc:
+        except Exception:
 
             st.error(
-                f"Could not open the uploaded image: {exc}"
+                "We couldn't open that image. Choose a clear JPG, PNG, or WebP leaf photo and try again."
             )
 
     disease_results = st.session_state.get(
@@ -1387,7 +1457,7 @@ elif st.session_state.page == "doctor":
 
         st.divider()
 
-        st.subheader("AI results")
+        st.subheader("Leaf screening result")
 
         best = disease_results[0]
 
@@ -1395,26 +1465,17 @@ elif st.session_state.page == "doctor":
         plant = best["plant"]
         confidence = best["confidence"]
 
-        if disease == "Healthy":
-
-            st.success(
-                f"🌿 The AI predicts that the "
-                f"{plant} leaf looks healthy."
-            )
-
-        else:
-
-            st.warning(
-                f"⚠️ Possible condition: **{disease}**"
-            )
+        st.subheader("Plain-language result")
+        st.write(leaf_result_summary(plant, disease, confidence))
 
         st.metric(
-            "Confidence",
+            "Model match score",
             f"{confidence * 100:.1f}%",
         )
+        st.caption("The model score is not a measure of diagnostic certainty.")
 
-        st.subheader(f"🌿 {tr('treatment_title', language)}")
-        st.info(f"💡 {first_steps(disease)}")
+        st.subheader(tr("treatment_title", language))
+        st.info(first_steps(disease))
         st.caption("The image is used for this screening and is not written to the history database. Hosted deployments still receive the upload for local inference.")
         st.caption("General first steps follow [University of Minnesota Extension disease-prevention guidance](https://extension.umn.edu/garden-and-home/yard-and-garden/gardening-in-minnesota/yard-and-garden-problems/preventing-plant-diseases-in-the-garden). See [UC IPM tomato mosaic guidance](https://ipm.ucanr.edu/agriculture/tomato/tobacco-mosaic/) and [Oregon State Extension apple scab guidance](https://extension.oregonstate.edu/es/node/123546/printable/print) for those examples. Local diagnosis and treatment rules vary.")
         render_voice_button(f"Possible condition: {disease}. {first_steps(disease)} {tr('screening_warning', language)}")
@@ -1440,7 +1501,7 @@ elif st.session_state.page == "doctor":
 
 elif st.session_state.page == "history":
 
-    st.subheader(f"🕘 {tr('history_title', language)}")
+    st.subheader(tr("history_title", language))
     st.write(tr("history_intro", language))
     if not st.session_state.username:
         st.info("Sign in from the sidebar to view saved activity. Guest activity remains only in the current session.")
@@ -1468,7 +1529,7 @@ elif st.session_state.page == "history":
 
 elif st.session_state.page == "share":
 
-    st.subheader(f"📱 {tr('share_title', language)}")
+    st.subheader(tr("share_title", language))
     st.write("Create a QR code for a public CropWise deployment. QR generation happens locally in this app.")
     public_url = st.text_input(
         tr("public_url", language),
@@ -1493,7 +1554,7 @@ elif st.session_state.page == "share":
 
 elif st.session_state.page == "impact":
 
-    st.subheader(f"🌍 {tr('impact_title', language)}")
+    st.subheader(tr("impact_title", language))
 
     # --------------------------------------------------------
     # WHAT IS CROPWISE?
@@ -1505,7 +1566,7 @@ elif st.session_state.page == "impact":
     )
 
     st.markdown(
-        '<div class="about-title">🌱 What is CropWise?</div>',
+        '<div class="about-title">What is CropWise?</div>',
         unsafe_allow_html=True,
     )
 
@@ -1562,7 +1623,7 @@ elif st.session_state.page == "impact":
     )
 
     st.markdown(
-        '<div class="about-title">🌍 Data sources</div>',
+        '<div class="about-title">Data sources</div>',
         unsafe_allow_html=True,
     )
 
@@ -1593,7 +1654,7 @@ elif st.session_state.page == "impact":
     )
 
     st.markdown(
-        '<div class="about-title">🧠 How suitability is calculated</div>',
+        '<div class="about-title">How suitability is calculated</div>',
         unsafe_allow_html=True,
     )
 
@@ -1603,9 +1664,9 @@ elif st.session_state.page == "impact":
 
     st.markdown(
         """
-        - 🌡️ **Average temperature**
-        - 🌧️ **Annual rainfall**
-        - 🧪 **Soil pH**
+        - **Average temperature**
+        - **Annual rainfall**
+        - **Soil pH**
         """
     )
 
@@ -1635,7 +1696,7 @@ elif st.session_state.page == "impact":
     )
 
     st.markdown(
-        '<div class="about-title">⚙️ How CropWise works</div>',
+        '<div class="about-title">How CropWise works</div>',
         unsafe_allow_html=True,
     )
 
@@ -1666,6 +1727,6 @@ elif st.session_state.page == "impact":
 st.divider()
 
 st.caption(
-    "🌱 CropWise • Reboot the Earth 2026 • "
+    "CropWise • Reboot the Earth 2026 • "
     "Challenge 1 • Team 17"
 )
