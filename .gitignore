@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+cropwise.db
+cropwise.db-shm
+cropwise.db-wal
+*.sqlite3
+.venv/
+venv/
+.streamlit/secrets.toml
