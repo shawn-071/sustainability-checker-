@@ -240,19 +240,24 @@ def fetch_soil(lat: float, lon: float) -> dict:
             else float(raw_value)
         )
 
-    except requests.RequestException as exc:
+    except requests.Timeout:
         out["error"] = (
-            f"SoilGrids request failed: {exc}"
+            "Soil pH data is taking longer than expected. Try again shortly; your other field results are still available."
         )
 
-    except (ValueError, KeyError, TypeError, StopIteration) as exc:
+    except requests.RequestException:
         out["error"] = (
-            f"SoilGrids data could not be read: {exc}"
+            "Soil pH data is temporarily unavailable. Try again later or enter a local soil pH value."
         )
 
-    except Exception as exc:
+    except (ValueError, KeyError, TypeError, StopIteration):
         out["error"] = (
-            f"SoilGrids fetch failed: {exc}"
+            "The soil service returned an unexpected response. Try again later or enter a local soil pH value."
+        )
+
+    except Exception:
+        out["error"] = (
+            "Soil pH data could not be loaded right now. Try again later or enter a local soil pH value."
         )
 
     return out

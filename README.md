@@ -1,6 +1,6 @@
-# CropWise
+# Terrasense
 
-CropWise helps farmers review a field, compare crop options, plan a small set of companion crops, and run a first-pass leaf health screen. The project addresses the knowledge gap behind poor land-use decisions with clear, low-cost information.
+Terrasense helps farmers review a field, compare crop options, plan a small set of companion crops, and run a first-pass leaf health screen. The project addresses the knowledge gap behind poor land-use decisions with clear, low-cost information.
 
 Built for Reboot the Earth 2026, Challenge 1, Team 17.
 
@@ -10,14 +10,14 @@ Built for Reboot the Earth 2026, Challenge 1, Team 17.
 - Interactive world maps for field assessment and planting plans, with optional browser location at startup and manual point clearing.
 - Crop suitability screening with visible factor scores and assumptions.
 - A starter companion-planting planner with references and site-fit checks.
-- Leaf photo screening with general low-cost first steps.
+- Crop-specific leaf photo screening for classes supported by the model, with general low-cost first steps.
 - Optional account registration, salted password hashes, local activity history, and cached point data.
 - Voice readout using the browser’s speech support.
 - Core navigation and guidance in Arabic, Chinese, English, French, Russian, and Spanish.
 - Local QR-code generation for a configured public deployment URL.
 - Draft privacy and terms copy, plus relevant UN Sustainable Development Goals.
 
-The app is a decision-support prototype. It does not predict yield, diagnose plant disease, or replace local agricultural advice.
+The app is a decision-support prototype. Its crop screen does not predict yield, and its leaf model does not provide a confirmed diagnosis or replace local agricultural advice.
 
 ## Run locally
 
@@ -31,32 +31,14 @@ The app is a decision-support prototype. It does not predict yield, diagnose pla
    streamlit run app.py
    ```
 
-The first online disease screening downloads the open-source model. Once the model is present in the local Hugging Face cache, Offline mode can use it without downloading files.
+The first online leaf screening downloads the open-source model. Once the model is present in the local Hugging Face cache, Offline mode can use it without downloading files. The model card describes 38 PlantVillage classes; the app checks the selected crop against those labels and does not force a result for an unsupported crop. Its displayed class score is not diagnostic certainty. See the [model card](https://huggingface.co/linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification).
 
 ## Configuration
 
 - `APP_PUBLIC_URL`: optional HTTPS URL used to prefill the Share app page before generating a QR code.
-- `CROPWISE_DB_PATH`: optional path for the SQLite database. By default, the app creates `cropwise.db` beside `app.py`.
-- Google sign-in uses Streamlit's OpenID Connect support. It remains inactive until OAuth credentials are configured in Streamlit secrets.
+- `TERRASENSE_DB_PATH`: optional path for the SQLite database. By default, the app creates `terrasense.db` beside `app.py`. Existing `cropwise.db` files and the older `CROPWISE_DB_PATH` setting remain recognized so saved local history can continue to work.
 
-### Configure Google sign-in
-
-1. Create a Web application OAuth client in Google Cloud.
-2. Add the exact app callback URL to its authorized redirect URIs. For local development, use `http://localhost:8501/oauth2callback`; for Streamlit Community Cloud, use `https://YOUR-APP.streamlit.app/oauth2callback`.
-3. Add the following values to the app's Streamlit secrets, replacing each placeholder. Do not commit a real `secrets.toml` or client secret to the repository.
-
-   ```toml
-   [auth]
-   redirect_uri = "https://YOUR-APP.streamlit.app/oauth2callback"
-   cookie_secret = "a-long-random-secret"
-   client_id = "YOUR_GOOGLE_CLIENT_ID"
-   client_secret = "YOUR_GOOGLE_CLIENT_SECRET"
-   server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
-   ```
-
-   In Streamlit Community Cloud, enter this under the app's **Settings → Secrets**. For local use, save it as `.streamlit/secrets.toml`. The Google redirect URI and `redirect_uri` value must match exactly. See the [Streamlit Google authentication guide](https://docs.streamlit.io/develop/tutorials/authentication/google).
-
-The database stores usernames, salted password hashes, saved history, and cached field values. Uploaded leaf images are not written to the database. A hosted installation needs persistent, access-controlled storage for durable account history. Treat the account flow as a prototype until production security, backups, password recovery, and retention policies are reviewed.
+The database stores usernames, salted password hashes, saved history, and cached field values. Uploaded leaf images are not written to the database. A hosted installation needs persistent, access-controlled storage for durable account history. Treat the local account flow as a prototype until production security, backups, password recovery, and retention policies are reviewed.
 
 ## Free data and connectivity
 

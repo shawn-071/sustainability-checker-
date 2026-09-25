@@ -1,5 +1,4 @@
 import html
-import hashlib
 import io
 import json
 import os
@@ -21,7 +20,7 @@ from crop_data import (
 )
 from data_sources import fetch_climate, fetch_soil, fetch_terrain
 from suitability import evaluate, get_factor_scores
-from disease_model import load_model, predict
+from disease_model import load_model, predict, supported_plant_names, supports_plant
 from localization import LANGUAGES, t as tr
 from local_store import (
     authenticate,
@@ -31,7 +30,6 @@ from local_store import (
     init_db,
     put_location_cache,
     record_history,
-    ensure_external_user,
 )
 from plant_health import first_steps
 from polyculture import recommendations
@@ -45,8 +43,8 @@ APP_DIR = Path(__file__).resolve().parent
 LOGO_PATH = APP_DIR / "assets" / "terrasense-logo.png"
 
 st.set_page_config(
-    page_title="CropWise | Field planning companion",
-    page_icon=str(LOGO_PATH) if LOGO_PATH.exists() else "CropWise",
+    page_title="Terrasense | Field planning companion",
+    page_icon=str(LOGO_PATH) if LOGO_PATH.exists() else ":material/eco:",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -114,12 +112,6 @@ if "planner_map_generation" not in st.session_state:
 if "planner_last_map_click" not in st.session_state:
     st.session_state.planner_last_map_click = None
 
-if "auth_provider" not in st.session_state:
-    st.session_state.auth_provider = None
-
-if "display_name" not in st.session_state:
-    st.session_state.display_name = None
-
 if "analysis" not in st.session_state:
     st.session_state.analysis = None
 
@@ -148,45 +140,6 @@ except Exception:
     DB_READY = False
 
 
-def google_auth_configured():
-    """Return true only when the required Google OIDC secrets are present."""
-    try:
-        auth = st.secrets.get("auth", {})
-        required = ("redirect_uri", "cookie_secret", "client_id", "client_secret", "server_metadata_url")
-        values = [str(auth.get(key, "")).strip().lower() for key in required]
-        return all(
-            value
-            and value not in {"xxx", "<your-value>"}
-            and "replace-with" not in value
-            and not value.startswith("<")
-            for value in values
-        )
-    except Exception:
-        return False
-
-
-GOOGLE_LOGIN_CONFIGURED = google_auth_configured()
-
-try:
-    google_user = st.user if st.user.is_logged_in else None
-except Exception:
-    google_user = None
-
-if google_user is not None:
-    google_identity = google_user.to_dict()
-    google_email = str(google_identity.get("email") or google_identity.get("sub") or "").strip().lower()
-    if google_email:
-        external_username = "google_" + hashlib.sha256(google_email.encode("utf-8")).hexdigest()[:20]
-        if DB_READY:
-            try:
-                ensure_external_user(external_username)
-            except Exception:
-                DB_READY = False
-        st.session_state.username = external_username
-        st.session_state.display_name = google_identity.get("name") or google_identity.get("email") or "Google account"
-        st.session_state.auth_provider = "google"
-
-
 # ============================================================
 # HELPERS
 # ============================================================
@@ -209,9 +162,9 @@ class LocationClickBridge(MacroElement):
     _template = Template(
         """
         {% macro script(this, kwargs) %}
-        var cropwiseMap = {{ this._parent.get_name() }};
-        cropwiseMap.on('locationfound', function(event) {
-            cropwiseMap.fire('click', {latlng: event.latlng});
+        var terrasenseMap = {{ this._parent.get_name() }};
+        terrasenseMap.on('locationfound', function(event) {
+            terrasenseMap.fire('click', {latlng: event.latlng});
         });
         {% endmacro %}
         """
@@ -309,18 +262,53 @@ def field_result_summary(crop, verdict, score, factors=None):
 
 
 def leaf_result_summary(plant, disease, match_score):
-    """Describe the model's leading label in plain language and set expectations."""
+    """Describe the model's crop-specific class without presenting it as a diagnosis."""
     score_text = f" The model match score is {match_score * 100:.1f}%."
     if disease == "Healthy":
         return (
-            f"The image model's leading match is a healthy-looking {plant} leaf."
-            f"{score_text} Keep monitoring the plant; this screen cannot rule out disease."
+            f"For the selected crop, the model's closest class is a healthy-looking {plant} leaf."
+            f"{score_text} This screen cannot confirm the plant species or rule out disease; keep monitoring the plant."
         )
     return (
-        f"The image model's leading match is {disease} on {plant}.{score_text} "
-        "This is an automated visual screening, not a confirmed diagnosis. "
-        "Use the first steps below and ask local agricultural support to confirm the cause."
+        f"For the selected crop, the model's closest class is {disease} on {plant}.{score_text} "
+        "This is a limited visual screening, not a confirmed diagnosis. Ask local agricultural support to confirm the cause before treatment."
     )
+
+
+def logo_svg(width):
+    """Render a compact Terrasense mark if the uploaded image asset is missing."""
+    return f'''<svg role="img" aria-label="Terrasense logo" width="{width}" height="{width}" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+      <defs><linearGradient id="terra" x1="0" y1="1" x2="1" y2="0"><stop stop-color="#10b981"/><stop offset="1" stop-color="#20c4d1"/></linearGradient></defs>
+      <rect x="72" y="72" width="368" height="368" rx="112" fill="url(#terra)"/>
+      <path d="M174 171c44 0 73 14 82 47 9-33 38-47 82-47 6 0 10 5 9 11-8 42-36 61-83 61h-2v103c0 8-5 13-13 13h-1c-8 0-13-5-13-13V243h-2c-47 0-75-19-83-61-1-6 3-11 9-11z" fill="#111827"/>
+    </svg>'''
+
+
+def render_logo(width):
+    """Show the supplied PNG, with an inline vector fallback for root-only uploads."""
+    if LOGO_PATH.is_file():
+        st.image(str(LOGO_PATH), width=width)
+    else:
+        render_html(logo_svg(width))
+
+
+def voice_field_summary(analysis):
+    crop = analysis.get("crop", "selected crop")
+    verdict = analysis.get("verdict", "Unknown")
+    score = analysis.get("score")
+    climate = analysis.get("climate", {})
+    soil = analysis.get("soil", {})
+    summary = field_result_summary(crop, verdict, score, analysis.get("factors"))
+    details = []
+    for key, label, unit in (("temp_c", "average temperature", "degrees Celsius"), ("rain_mm_year", "annual rainfall", "millimeters per year"),):
+        value = climate.get(key)
+        if value is not None:
+            details.append(f"{label} {float(value):.1f} {unit}" if key == "temp_c" else f"{label} {float(value):.0f} {unit}")
+    if soil.get("ph") is not None:
+        details.append(f"soil pH {float(soil['ph']):.2f}")
+    if soil.get("elevation_m") is not None:
+        details.append(f"terrain elevation {float(soil['elevation_m']):.0f} meters")
+    return " ".join([summary, *details, tr("screening_warning", st.session_state.language)])
 
 
 def format_factor_value(value, unit):
@@ -346,6 +334,10 @@ def format_factor_value(value, unit):
 def reset_analysis():
     st.session_state.analysis = None
     st.session_state.crop_results = None
+    st.session_state.disease_results = None
+
+
+def clear_disease_results():
     st.session_state.disease_results = None
 
 
@@ -572,8 +564,6 @@ render_html(
     }}
     .hero h1 {{ margin: 0; font-size: 2.25rem; font-weight: 800; color: var(--app-text) !important; }}
     .hero p {{ margin: .4rem 0 0; color: var(--app-muted) !important; font-size: 1.02rem; }}
-    .about-box {{ padding: 1.2rem; border-radius: 16px; border: 1px solid var(--app-border); background: var(--app-card); margin-bottom: 1rem; }}
-    .about-title {{ font-size: 1.2rem; font-weight: 750; margin-bottom: .7rem; color: var(--app-accent); }}
     .feature-title {{ color: var(--app-accent); font-weight: 750; font-size: 1.05rem; margin-bottom: .35rem; }}
     footer {{ visibility: hidden; }}
     </style>
@@ -597,9 +587,8 @@ with st.sidebar:
     st.session_state.language = LANGUAGES[selected_language]
     language = st.session_state.language
 
-    if LOGO_PATH.exists():
-        st.image(str(LOGO_PATH), width=104)
-    st.markdown("## CropWise")
+    render_logo(104)
+    st.markdown("## Terrasense")
     st.caption(tr("tagline", language))
 
     st.divider()
@@ -637,28 +626,11 @@ with st.sidebar:
 
     with st.expander(tr("account", language)):
         if st.session_state.username:
-            account_label = st.session_state.display_name or st.session_state.username
-            st.success(f"Signed in as {safe_text(account_label)}")
+            st.success(f"Signed in as {safe_text(st.session_state.username)}")
             if st.button(tr("logout", language), use_container_width=True):
-                use_google_logout = st.session_state.auth_provider == "google"
                 st.session_state.username = None
-                st.session_state.display_name = None
-                st.session_state.auth_provider = None
-                if use_google_logout:
-                    st.logout()
-                else:
-                    st.rerun()
+                st.rerun()
         else:
-            if st.button(
-                "Sign in with Google",
-                key="google_sign_in_button",
-                use_container_width=True,
-                disabled=not GOOGLE_LOGIN_CONFIGURED,
-            ):
-                st.login()
-            if not GOOGLE_LOGIN_CONFIGURED:
-                st.caption("Google sign-in needs OAuth details in Streamlit secrets. Setup steps are in the README.")
-
             if not DB_READY:
                 st.warning("Local account storage could not be opened on this installation.")
             else:
@@ -669,8 +641,6 @@ with st.sidebar:
                     if st.button(tr("sign_in", language), key="sign_in_button", use_container_width=True):
                         if authenticate(login_name, login_password):
                             st.session_state.username = login_name.strip()
-                            st.session_state.display_name = login_name.strip()
-                            st.session_state.auth_provider = "local"
                             st.rerun()
                         st.error("The username or password was not recognized.")
                 with register_tab:
@@ -693,13 +663,12 @@ with st.sidebar:
 
 hero_logo, hero_copy = st.columns([0.12, 0.88], vertical_alignment="center")
 with hero_logo:
-    if LOGO_PATH.exists():
-        st.image(str(LOGO_PATH), width=68)
+    render_logo(68)
 with hero_copy:
     render_html(
         f"""
         <div class="hero">
-            <h1>CropWise</h1>
+            <h1>Terrasense</h1>
             <p>{safe_text(tr("tagline", language))}<br>
             <span>{safe_text(tr("problem", language))}</span></p>
         </div>
@@ -716,7 +685,6 @@ for column, (title_key, description_key) in zip(feature_columns, feature_copy):
     with column:
         st.markdown(f"#### {tr(title_key, language)}")
         st.caption(tr(description_key, language))
-render_voice_button(". ".join(tr(key, language) for key in ("problem", "map_intro", "planner_intro", "doctor_intro")))
 
 
 # ============================================================
@@ -835,7 +803,7 @@ if st.session_state.page == "map":
             height=470,
             width=None,
             returned_objects=["last_clicked"],
-            key=f"cropwise_map_{st.session_state.field_map_generation}",
+        key=f"terrasense_map_{st.session_state.field_map_generation}",
         )
 
         selected_coordinates = get_location_coordinates(map_data)
@@ -1188,7 +1156,12 @@ if st.session_state.page == "map":
             st.warning(soil["error"])
         if soil.get("terrain_error"):
             st.warning(soil["terrain_error"])
-        render_voice_button(tr("screening_warning", language))
+        render_voice_button(voice_field_summary(analysis))
+    else:
+        render_voice_button(
+            tr("map_intro", language)
+            + " Choose a point on the map to review climate, soil, and terrain signals."
+        )
 
 
 # ============================================================
@@ -1201,6 +1174,14 @@ elif st.session_state.page == "planner":
 
     st.write(tr("planner_intro", language))
     st.caption("Start with a field assessment to compare suitable crops, then build a companion plan from the screened pairings.")
+    finder = st.session_state.get("crop_results")
+    if not isinstance(finder, dict) or not finder.get("results"):
+        point_note = (
+            f" Selected point: {st.session_state.planner_lat:.5f}, {st.session_state.planner_lon:.5f}."
+            if st.session_state.planner_point_selected
+            else " Select a location on the map to start."
+        )
+        render_voice_button(tr("planner_intro", language) + point_note)
 
     st.markdown("#### Select a point on the planting map")
     planner_map_center = (
@@ -1226,7 +1207,7 @@ elif st.session_state.page == "planner":
         height=430,
         width=None,
         returned_objects=["last_clicked"],
-        key=f"cropwise_planner_map_{st.session_state.planner_map_generation}",
+        key=f"terrasense_planner_map_{st.session_state.planner_map_generation}",
     )
     planner_coordinates = get_location_coordinates(planner_map_data)
     if planner_coordinates and st.session_state.planner_last_map_click != planner_coordinates:
@@ -1421,7 +1402,22 @@ elif st.session_state.page == "planner":
             else:
                 st.info("This first edition includes sourced examples for maize, green bean, pumpkin, cabbage, broccoli, carrot, and tomato. More locally reviewed pairings can be added.")
             st.warning(tr("screening_warning", language))
-            render_voice_button(tr("planner_intro", language) + " " + tr("screening_warning", language))
+            voice_parts = [
+                tr("planner_intro", language),
+                field_result_summary(best_result["crop"], best_result["verdict"], best_result["score"]),
+                "Highest screened crops: " + "; ".join(
+                    f"{item['crop']}, {item['verdict']}, {score_percent(item['score'])} percent"
+                    for item in results[:5]
+                ),
+                f"Companion plan for {main_crop}.",
+            ]
+            if companion_options:
+                voice_parts.extend(
+                    f"{item['crop']}: {item['why']} Management: {item['manage']}"
+                    for item in companion_options
+                )
+            voice_parts.append(tr("screening_warning", language))
+            render_voice_button(" ".join(voice_parts))
 
 
 # ============================================================
@@ -1434,6 +1430,15 @@ elif st.session_state.page == "doctor":
 
     st.write(tr("doctor_intro", language))
     st.warning(tr("screening_warning", language))
+    doctor_crop_options = ["Choose a crop"] + sorted(CROP_THRESHOLDS.keys()) + ["Not sure"]
+    doctor_crop = st.selectbox(
+        "What crop is shown in the photo?",
+        doctor_crop_options,
+        key="doctor_crop_selection",
+        on_change=clear_disease_results,
+        help="The image model only covers crops in its training labels. If your crop is not supported, the app will say so instead of showing a forced nearest match.",
+    )
+    st.caption("For a crop-specific screen, select the crop before analyzing. Choose “Not sure” only to see the model’s closest trained class.")
 
     camera_photo = st.camera_input(tr("camera_photo", language))
     uploaded_file = camera_photo or st.file_uploader(
@@ -1464,39 +1469,55 @@ elif st.session_state.page == "doctor":
                 use_container_width=True,
             ):
 
-                with st.spinner(
-                    "Loading the disease AI..."
-                ):
+                if doctor_crop == "Choose a crop":
+                    st.error("Select the crop shown in the photo before starting the screen.")
+                else:
+                    with st.spinner("Loading the leaf screening model..."):
 
-                    try:
+                        try:
 
-                        model = cached_disease_model(st.session_state.offline_mode)
+                            model = cached_disease_model(st.session_state.offline_mode)
+                            is_uncertain_crop = doctor_crop == "Not sure"
 
-                        predictions = predict(
-                            image,
-                            model,
-                            top_k=3,
-                        )
+                            if not is_uncertain_crop and not supports_plant(model, doctor_crop):
+                                predictions = [{
+                                    "plant": doctor_crop,
+                                    "disease": "Unsupported crop",
+                                    "confidence": None,
+                                    "selected_crop": doctor_crop,
+                                    "unsupported_crop": True,
+                                    "supported_plants": supported_plant_names(model),
+                                }]
+                            else:
+                                predictions = predict(
+                                    image,
+                                    model,
+                                    top_k=3,
+                                    plant_filter=None if is_uncertain_crop else doctor_crop,
+                                )
+                                for prediction in predictions:
+                                    prediction["selected_crop"] = doctor_crop
+                                    prediction["uncertain_crop"] = is_uncertain_crop
 
-                        st.session_state.disease_results = predictions
-                        best = predictions[0] if predictions else {}
-                        save_activity(
-                            "leaf screening",
-                            crop=best.get("plant"),
-                            outcome=best.get("disease"),
-                            score=best.get("confidence"),
-                            details={"image_saved": False},
-                        )
-
-                    except Exception:
-
-                        if st.session_state.offline_mode:
-                            st.error("The model is not cached for offline use yet. Connect once, run a screening, and then retry offline.")
-                        else:
-                            st.error(
-                                "Leaf screening couldn't run. Try again later. If you "
-                                "are offline, connect once to download the model, then retry."
+                            st.session_state.disease_results = predictions
+                            best = predictions[0] if predictions else {}
+                            save_activity(
+                                "leaf screening",
+                                crop=doctor_crop if best.get("unsupported_crop") else best.get("plant"),
+                                outcome="Model does not cover selected crop" if best.get("unsupported_crop") else best.get("disease"),
+                                score=best.get("confidence"),
+                                details={"image_saved": False, "unsupported_crop": bool(best.get("unsupported_crop"))},
                             )
+
+                        except Exception:
+
+                            if st.session_state.offline_mode:
+                                st.error("The model is not cached for offline use yet. Connect once, run a screening, and then retry offline.")
+                            else:
+                                st.error(
+                                    "Leaf screening couldn't run. Try again later. If you "
+                                    "are offline, connect once to download the model, then retry."
+                                )
 
         except Exception:
 
@@ -1515,39 +1536,58 @@ elif st.session_state.page == "doctor":
         st.subheader("Leaf screening result")
 
         best = disease_results[0]
+        if best.get("unsupported_crop"):
+            supported = ", ".join(best.get("supported_plants", [])) or "the crops listed by the model"
+            message = (
+                f"This model has no trained class for {best['plant']}, so it cannot screen this crop reliably. "
+                "We have not assigned a disease label or treatment. Choose a supported crop only if it matches the photo, "
+                "or ask local agricultural support for help."
+            )
+            st.warning(message)
+            st.caption(f"Crops represented in the model: {supported}.")
+            render_voice_button(message + f" Crops represented in the model include: {supported}.")
+        else:
+            disease = best["disease"]
+            plant = best["plant"]
+            confidence = best["confidence"]
+            is_uncertain_crop = best.get("uncertain_crop", False)
 
-        disease = best["disease"]
-        plant = best["plant"]
-        confidence = best["confidence"]
+            st.subheader("Plain-language result")
+            if disease == "Unknown" or plant == "Unknown crop":
+                result_text = (
+                    "The model returned a label this app could not interpret. No plant or disease is identified, "
+                    "and no treatment steps are suggested. Try a clear photo or ask local agricultural support."
+                )
+            elif is_uncertain_crop:
+                result_text = (
+                    f"The model's closest trained class is {disease} on {plant}. "
+                    "Because the crop was not selected, this is only a broad nearest-class result and may not apply to the plant in the photo."
+                )
+            else:
+                result_text = leaf_result_summary(plant, disease, confidence)
+            st.write(result_text)
 
-        st.subheader("Plain-language result")
-        st.write(leaf_result_summary(plant, disease, confidence))
+            if disease != "Unknown" and plant != "Unknown crop":
+                st.metric("Model class score", f"{confidence * 100:.1f}%")
+                st.caption("This score is the model's class match, not diagnostic certainty. Crop-specific scores are compared only within that crop's trained labels.")
 
-        st.metric(
-            "Model match score",
-            f"{confidence * 100:.1f}%",
-        )
-        st.caption("The model score is not a measure of diagnostic certainty.")
+            st.subheader(tr("treatment_title", language))
+            if disease == "Unknown":
+                treatment_text = "The model label could not be interpreted, so no treatment steps are suggested."
+                st.info(treatment_text)
+            else:
+                treatment_text = first_steps(disease)
+                st.info(treatment_text)
+            st.caption("The image is used for this screening and is not written to the history database. Hosted deployments still receive the upload for local inference.")
+            st.caption("General first steps follow [University of Minnesota Extension disease-prevention guidance](https://extension.umn.edu/garden-and-home/yard-and-garden/gardening-in-minnesota/yard-and-garden-problems/preventing-plant-diseases-in-the-garden). See [UC IPM tomato mosaic guidance](https://ipm.ucanr.edu/agriculture/tomato/tobacco-mosaic/) and [Oregon State Extension apple scab guidance](https://extension.oregonstate.edu/es/node/123546/printable/print) for those examples. Local diagnosis and treatment rules vary.")
+            render_voice_button(f"{result_text} {treatment_text} {tr('screening_warning', language)}")
 
-        st.subheader(tr("treatment_title", language))
-        st.info(first_steps(disease))
-        st.caption("The image is used for this screening and is not written to the history database. Hosted deployments still receive the upload for local inference.")
-        st.caption("General first steps follow [University of Minnesota Extension disease-prevention guidance](https://extension.umn.edu/garden-and-home/yard-and-garden/gardening-in-minnesota/yard-and-garden-problems/preventing-plant-diseases-in-the-garden). See [UC IPM tomato mosaic guidance](https://ipm.ucanr.edu/agriculture/tomato/tobacco-mosaic/) and [Oregon State Extension apple scab guidance](https://extension.oregonstate.edu/es/node/123546/printable/print) for those examples. Local diagnosis and treatment rules vary.")
-        render_voice_button(f"Possible condition: {disease}. {first_steps(disease)} {tr('screening_warning', language)}")
-
-        if len(disease_results) > 1:
-
-            with st.expander(
-                "Other possibilities"
-            ):
-
-                for result in disease_results[1:]:
-
-                    st.write(
-                        f"• {result['plant']} — "
-                        f"{result['disease']} "
-                        f"({result['confidence'] * 100:.1f}%)"
-                    )
+            if len(disease_results) > 1:
+                with st.expander("Other possibilities"):
+                    for result in disease_results[1:]:
+                        st.write(f"{result['plant']} — {result['disease']} ({result['confidence'] * 100:.1f}%)")
+    else:
+        render_voice_button(tr("doctor_intro", language) + " " + tr("screening_warning", language))
 
 
 # ============================================================
@@ -1558,14 +1598,18 @@ elif st.session_state.page == "history":
 
     st.subheader(tr("history_title", language))
     st.write(tr("history_intro", language))
+    history_voice = [tr("history_intro", language)]
     if not st.session_state.username:
         st.info("Sign in from the sidebar to view saved activity. Guest activity remains only in the current session.")
+        history_voice.append("Sign in with a local account to view saved activity.")
     elif not DB_READY:
         st.error("Local history storage is unavailable on this installation.")
+        history_voice.append("Saved activity is unavailable on this installation.")
     else:
         history_rows = get_history(st.session_state.username)
         if not history_rows:
             st.info(tr("no_history", language))
+            history_voice.append(tr("no_history", language))
         else:
             for entry in history_rows:
                 title = entry.get("entry_type", "Activity").title()
@@ -1580,12 +1624,15 @@ elif st.session_state.page == "history":
                 if entry.get("latitude") is not None and entry.get("longitude") is not None:
                     details.append(f"{entry['latitude']:.5f}, {entry['longitude']:.5f}")
                 st.caption(" · ".join(details))
+                if len(history_voice) < 6:
+                    history_voice.append(f"{title}: " + ", ".join(details[1:]))
                 st.divider()
+    render_voice_button(" ".join(history_voice))
 
 elif st.session_state.page == "share":
 
     st.subheader(tr("share_title", language))
-    st.write("Create a QR code for a public CropWise deployment. QR generation happens locally in this app.")
+    st.write("Create a QR code for a public Terrasense deployment. QR generation happens locally in this app.")
     public_url = st.text_input(
         tr("public_url", language),
         value=os.environ.get("APP_PUBLIC_URL", ""),
@@ -1603,175 +1650,101 @@ elif st.session_state.page == "share":
             qr_image.save(qr_buffer, format="PNG")
             qr_bytes = qr_buffer.getvalue()
             st.image(qr_bytes, caption=tr("scan_qr", language), width=240)
-            st.download_button(tr("download_qr", language), qr_bytes, file_name="cropwise-app-qr.png", mime="image/png")
+            st.download_button(tr("download_qr", language), qr_bytes, file_name="terrasense-app-qr.png", mime="image/png")
     else:
         st.info(tr("qr_missing", language))
+    share_voice = tr("share_title", language) + ". " + tr("public_url", language) + ". "
+    share_voice += public_url if public_url else tr("qr_missing", language)
+    render_voice_button(share_voice)
 
 elif st.session_state.page == "impact":
 
     st.subheader(tr("impact_title", language))
-
-    # --------------------------------------------------------
-    # WHAT IS CROPWISE?
-    # --------------------------------------------------------
-
-    st.markdown(
-        '<div class="about-box">',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        '<div class="about-title">What is CropWise?</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.write(
-        "CropWise addresses a practical knowledge gap: farmers need clear field information before choosing a crop or treatment. It combines coordinate-based climate and soil signals with a transparent crop screen, companion planting prompts, and a low-cost first response to leaf symptoms."
-    )
-
-    st.write(
-        "The aim is to support better use of land and help farmers compare options that may improve crop production with lower cost and environmental pressure. The app does not promise a specific yield."
-    )
-
-    st.markdown(
-        "</div>",
-        unsafe_allow_html=True,
-    )
+    with st.container(border=True):
+        st.markdown("#### About Terrasense")
+        st.write(
+            "Terrasense addresses a practical knowledge gap: farmers need clear field information before choosing a crop or treatment. It combines coordinate-based climate and soil signals with a transparent crop screen, companion planting prompts, and a low-cost first response to leaf symptoms."
+        )
+        st.write(
+            "The aim is to support better use of land and help farmers compare options that may improve crop production with lower cost and environmental pressure. The app does not promise a specific yield."
+        )
 
     st.markdown(f"### {tr('sdg_title', language)}")
-    sdg_cols = st.columns(4)
-    for column, number, title, description in zip(
-        sdg_cols,
-        ("2", "12", "13", "15"),
-        ("Zero Hunger", "Responsible Consumption and Production", "Climate Action", "Life on Land"),
-        (
-            "Supports crop choices and food production decisions.",
-            "Promotes efficient use of soil, water, and inputs.",
-            "Uses climate information to guide field planning.",
-            "Encourages soil care and diverse planting systems.",
-        ),
-    ):
-        with column:
-            st.metric(f"UN SDG {number}", title)
-            st.caption(description)
-            st.markdown(f"[Official UN Goal {number}](https://sdgs.un.org/goals/goal{number})")
+    sdg_goals = (
+        ("2", "Zero Hunger", "Supports crop choices and food production decisions."),
+        ("12", "Responsible Consumption and Production", "Promotes efficient use of soil, water, and inputs."),
+        ("13", "Climate Action", "Uses climate information to guide field planning."),
+        ("15", "Life on Land", "Encourages soil care and diverse planting systems."),
+    )
+    sdg_cols = st.columns(2)
+    for index, (number, title, description) in enumerate(sdg_goals):
+        with sdg_cols[index % 2]:
+            with st.container(border=True):
+                st.markdown(f"**UN SDG {number}**")
+                st.markdown(f"**{title}**")
+                st.write(description)
+                st.markdown(f"[Official UN Goal {number}](https://sdgs.un.org/goals/goal{number})")
     st.caption(tr("sdg_note", language))
 
-    st.markdown(f"### {tr('privacy_title', language)}")
-    st.info(tr("privacy_body", language))
+    with st.container(border=True):
+        st.markdown(f"#### {tr('privacy_title', language)}")
+        st.write(tr("privacy_body", language))
+    with st.container(border=True):
+        st.markdown(f"#### {tr('terms_title', language)}")
+        st.write(tr("terms_body", language))
+    with st.container(border=True):
+        st.markdown("#### Free and offline use")
+        st.write(tr("offline_detail", language))
+        st.caption(tr("language_note", language))
 
-    st.markdown(f"### {tr('terms_title', language)}")
-    st.info(tr("terms_body", language))
+    with st.container(border=True):
+        st.markdown("#### Data sources")
+        st.markdown(
+            """
+            - **NASA POWER** — free public climate data (online refresh)
+            - **SoilGrids / ISRIC** — soil pH estimates (online refresh)
+            - **OpenStreetMap** — online map tiles
+            - **Open-Meteo Elevation API / Copernicus GLO-90** — terrain elevation and rough slope estimate; attribution required
+            - **PlantVillage** — source dataset for the leaf screening model
+            - **Hugging Face** — model files; download once before offline use
+            - **Free to run without paid API keys**; hosting and device costs depend on deployment
+            """
+        )
 
-    st.markdown("### Free and offline use")
-    st.write(tr("offline_detail", language))
-    st.caption(tr("language_note", language))
-    render_voice_button(tr("impact_title", language) + ". " + tr("sdg_title", language))
+    with st.container(border=True):
+        st.markdown("#### How suitability is calculated")
+        st.write("Terrasense compares average temperature, annual rainfall, and soil pH.")
+        st.write(
+            "The available factors are combined into a transparent screening score. It does not account for every farm variable, including local varieties, irrigation, slope, soil depth, pests, market access, or planting date."
+        )
+        st.caption("Long-term climate estimates are regional baselines, not farm sensor readings or a true microclimate model. Soil pH and terrain estimates are not a laboratory test or field survey.")
+        st.info("The result is a screening indicator, not a guaranteed prediction of crop yield.")
 
-    # --------------------------------------------------------
-    # DATA SOURCES
-    # --------------------------------------------------------
+    with st.container(border=True):
+        st.markdown("#### How Terrasense works")
+        st.markdown(
+            """
+            **1. Map the field** — choose a point and review available climate and soil estimates.
 
-    st.markdown(
-        '<div class="about-box">',
-        unsafe_allow_html=True,
-    )
+            **2. Compare crops** — use the suitability screen and see which factors affected the score.
 
-    st.markdown(
-        '<div class="about-title">Data sources</div>',
-        unsafe_allow_html=True,
-    )
+            **3. Plan companion crops** — review sourced pairings and check each companion crop against the same field conditions.
 
-    st.markdown(
-        """
-        - **NASA POWER** — free public climate data (online refresh)
-        - **SoilGrids / ISRIC** — soil pH estimates (online refresh)
-        - **OpenStreetMap** — online map tiles
-        - **Open-Meteo Elevation API / Copernicus GLO-90** — terrain elevation and rough slope estimate; attribution required
-        - **PlantVillage** — source dataset for the local leaf image model
-        - **Hugging Face** — model files; download once before offline use
-        - **Free to run without paid API keys**; hosting and device costs depend on deployment
-        """
-    )
+            **4. Check leaf symptoms** — screen supported crop classes and review low-cost first steps.
 
-    st.markdown(
-        "</div>",
-        unsafe_allow_html=True,
-    )
+            **5. Save a history** — sign in to keep your results in the local database on this installation.
+            """
+        )
 
-    # --------------------------------------------------------
-    # HOW SUITABILITY IS CALCULATED
-    # --------------------------------------------------------
-
-    st.markdown(
-        '<div class="about-box">',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        '<div class="about-title">How suitability is calculated</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.write(
-        "CropWise compares the following environmental factors:"
-    )
-
-    st.markdown(
-        """
-        - **Average temperature**
-        - **Annual rainfall**
-        - **Soil pH**
-        """
-    )
-
-    st.write(
-        "The available factors are combined into a transparent screening score. It does not account for every farm variable, including local varieties, irrigation, slope, soil depth, pests, market access, or planting date."
-    )
-
-    st.caption("Long-term climate estimates are regional baselines, not farm sensor readings or a true microclimate model. Soil pH and terrain estimates are not a laboratory test or field survey.")
-
-    st.info(
-        "The result is a screening indicator, not a guaranteed "
-        "prediction of crop yield."
-    )
-
-    st.markdown(
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
-    # --------------------------------------------------------
-    # HOW THE APP WORKS
-    # --------------------------------------------------------
-
-    st.markdown(
-        '<div class="about-box">',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        '<div class="about-title">How CropWise works</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        """
-        **1. Map the field** — choose a point and review available climate and soil estimates.
-
-        **2. Compare crops** — use the suitability screen and see which factors affected the score.
-
-        **3. Plan companion crops** — review sourced pairings and check each companion crop against the same field conditions.
-
-        **4. Check leaf symptoms** — use a local image model for an initial screen and follow low-cost hygiene steps.
-
-        **5. Save a history** — sign in to keep your results in the local SQLite database on this installation.
-        """
-    )
-
-    st.markdown(
-        "</div>",
-        unsafe_allow_html=True,
+    sdg_voice = ". ".join(f"UN Sustainable Development Goal {number}: {title}" for number, title, _ in sdg_goals)
+    render_voice_button(
+        "Terrasense helps farmers compare field conditions and crop options. "
+        + sdg_voice
+        + ". The app uses public climate, soil, terrain, and map information. The leaf model only covers its trained crop classes. "
+        + tr("privacy_body", language)
+        + " " + tr("terms_body", language)
+        + " " + tr("offline_detail", language)
+        + " " + tr("language_note", language)
     )
 
 
@@ -1782,6 +1755,6 @@ elif st.session_state.page == "impact":
 st.divider()
 
 st.caption(
-    "CropWise • Reboot the Earth 2026 • "
+    "Terrasense • Reboot the Earth 2026 • "
     "Challenge 1 • Team 17"
 )

@@ -1,4 +1,4 @@
-"""Small local SQLite store for CropWise accounts, history, and field cache.
+"""Small local SQLite store for Terrasense accounts, history, and field cache.
 
 Passwords are stored as salted PBKDF2 hashes. Uploaded photos are never saved.
 For hosted deployments, configure persistent storage before relying on history.
@@ -17,7 +17,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-DB_PATH = Path(os.environ.get("CROPWISE_DB_PATH", Path(__file__).with_name("cropwise.db")))
+_NEW_DB_PATH = Path(__file__).with_name("terrasense.db")
+_LEGACY_DB_PATH = Path(__file__).with_name("cropwise.db")
+_CONFIGURED_DB_PATH = os.environ.get("TERRASENSE_DB_PATH") or os.environ.get("CROPWISE_DB_PATH")
+DB_PATH = (
+    Path(_CONFIGURED_DB_PATH)
+    if _CONFIGURED_DB_PATH
+    else _LEGACY_DB_PATH if _LEGACY_DB_PATH.exists() else _NEW_DB_PATH
+)
 PBKDF2_ROUNDS = 310_000
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,32}$")
 
@@ -96,21 +103,6 @@ def authenticate(username: str, password: str) -> bool:
         "sha256", password.encode("utf-8"), bytes.fromhex(row["salt"]), PBKDF2_ROUNDS
     ).hex()
     return hmac.compare_digest(candidate, row["password_hash"])
-
-
-def ensure_external_user(username: str) -> None:
-    """Create a history owner for an identity-provider user without a usable password."""
-    username = username.strip()
-    if not USERNAME_RE.fullmatch(username):
-        raise ValueError("External account identifier is invalid.")
-    salt = secrets.token_bytes(16)
-    random_password = secrets.token_bytes(32)
-    password_hash = hashlib.pbkdf2_hmac("sha256", random_password, salt, PBKDF2_ROUNDS)
-    with _connect() as db:
-        db.execute(
-            "INSERT OR IGNORE INTO users(username, salt, password_hash, created_at) VALUES (?, ?, ?, ?)",
-            (username, salt.hex(), password_hash.hex(), _now()),
-        )
 
 
 def record_history(

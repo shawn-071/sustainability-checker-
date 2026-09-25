@@ -1,5 +1,8 @@
 __pycache__/
 *.py[cod]
+terrasense.db
+terrasense.db-shm
+terrasense.db-wal
 cropwise.db
 cropwise.db-shm
 cropwise.db-wal
