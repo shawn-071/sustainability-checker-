@@ -1,0 +1,5 @@
+CropWise update files
+
+Extract this folder, then upload its contents to the root of your GitHub repository. Files with existing names replace those versions; assets/terrasense-logo.png and .streamlit/secrets.toml.example are new paths.
+
+Google sign-in stays inactive until you add real OAuth values to Streamlit secrets. Never upload a real .streamlit/secrets.toml or commit client secrets.

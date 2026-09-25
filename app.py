@@ -1,13 +1,19 @@
 import html
+import hashlib
 import io
 import json
 import os
+import textwrap
+from pathlib import Path
 
 import streamlit as st
 import streamlit.components.v1 as components
 import folium
+from folium.plugins import LocateControl
+from branca.element import MacroElement
 from streamlit_folium import st_folium
 from PIL import Image
+from jinja2 import Template
 import qrcode
 
 from crop_data import (
@@ -25,6 +31,7 @@ from local_store import (
     init_db,
     put_location_cache,
     record_history,
+    ensure_external_user,
 )
 from plant_health import first_steps
 from polyculture import recommendations
@@ -34,9 +41,12 @@ from polyculture import recommendations
 # PAGE CONFIG
 # ============================================================
 
+APP_DIR = Path(__file__).resolve().parent
+LOGO_PATH = APP_DIR / "assets" / "terrasense-logo.png"
+
 st.set_page_config(
     page_title="CropWise | Field planning companion",
-    page_icon="🌱",
+    page_icon=str(LOGO_PATH) if LOGO_PATH.exists() else "CropWise",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -59,6 +69,12 @@ PAGES = ["map", "planner", "doctor", "history", "impact", "share"]
 if "page" not in st.session_state:
     st.session_state.page = PAGES[0]
 
+if "page_navigation" not in st.session_state:
+    st.session_state.page_navigation = st.session_state.page
+
+if "theme_mode" not in st.session_state:
+    st.session_state.theme_mode = "Light"
+
 if "language" not in st.session_state:
     st.session_state.language = "en"
 
@@ -73,6 +89,36 @@ if "lat" not in st.session_state:
 
 if "lon" not in st.session_state:
     st.session_state.lon = DEFAULT_LON
+
+if "field_point_selected" not in st.session_state:
+    st.session_state.field_point_selected = False
+
+if "field_map_generation" not in st.session_state:
+    st.session_state.field_map_generation = 0
+
+if "location_auto_start" not in st.session_state:
+    st.session_state.location_auto_start = True
+
+if "planner_lat" not in st.session_state:
+    st.session_state.planner_lat = st.session_state.lat
+
+if "planner_lon" not in st.session_state:
+    st.session_state.planner_lon = st.session_state.lon
+
+if "planner_point_selected" not in st.session_state:
+    st.session_state.planner_point_selected = False
+
+if "planner_map_generation" not in st.session_state:
+    st.session_state.planner_map_generation = 0
+
+if "planner_last_map_click" not in st.session_state:
+    st.session_state.planner_last_map_click = None
+
+if "auth_provider" not in st.session_state:
+    st.session_state.auth_provider = None
+
+if "display_name" not in st.session_state:
+    st.session_state.display_name = None
 
 if "analysis" not in st.session_state:
     st.session_state.analysis = None
@@ -102,6 +148,45 @@ except Exception:
     DB_READY = False
 
 
+def google_auth_configured():
+    """Return true only when the required Google OIDC secrets are present."""
+    try:
+        auth = st.secrets.get("auth", {})
+        required = ("redirect_uri", "cookie_secret", "client_id", "client_secret", "server_metadata_url")
+        values = [str(auth.get(key, "")).strip().lower() for key in required]
+        return all(
+            value
+            and value not in {"xxx", "<your-value>"}
+            and "replace-with" not in value
+            and not value.startswith("<")
+            for value in values
+        )
+    except Exception:
+        return False
+
+
+GOOGLE_LOGIN_CONFIGURED = google_auth_configured()
+
+try:
+    google_user = st.user if st.user.is_logged_in else None
+except Exception:
+    google_user = None
+
+if google_user is not None:
+    google_identity = google_user.to_dict()
+    google_email = str(google_identity.get("email") or google_identity.get("sub") or "").strip().lower()
+    if google_email:
+        external_username = "google_" + hashlib.sha256(google_email.encode("utf-8")).hexdigest()[:20]
+        if DB_READY:
+            try:
+                ensure_external_user(external_username)
+            except Exception:
+                DB_READY = False
+        st.session_state.username = external_username
+        st.session_state.display_name = google_identity.get("name") or google_identity.get("email") or "Google account"
+        st.session_state.auth_provider = "google"
+
+
 # ============================================================
 # HELPERS
 # ============================================================
@@ -111,6 +196,52 @@ def safe_text(value):
     if value is None:
         return "—"
     return html.escape(str(value))
+
+
+def render_html(markup):
+    """Render an HTML fragment without Markdown interpreting indentation as code."""
+    st.markdown(textwrap.dedent(markup).strip(), unsafe_allow_html=True)
+
+
+class LocationClickBridge(MacroElement):
+    """Forward a browser geolocation result as a normal map click for Streamlit."""
+
+    _template = Template(
+        """
+        {% macro script(this, kwargs) %}
+        var cropwiseMap = {{ this._parent.get_name() }};
+        cropwiseMap.on('locationfound', function(event) {
+            cropwiseMap.fire('click', {latlng: event.latlng});
+        });
+        {% endmacro %}
+        """
+    )
+
+
+def add_location_controls(map_object, auto_start=False):
+    LocateControl(
+        auto_start=auto_start,
+        position="topleft",
+        strings={"title": "Show my location"},
+        flyTo=True,
+        keepCurrentZoomLevel=False,
+        showPopup=True,
+    ).add_to(map_object)
+    LocationClickBridge().add_to(map_object)
+
+
+def get_location_coordinates(map_data):
+    clicked = map_data.get("last_clicked") if isinstance(map_data, dict) else None
+    if not clicked:
+        return None
+    try:
+        latitude = round(float(clicked["lat"]), 5)
+        longitude = round(float(clicked["lng"]), 5)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        return None
+    return latitude, longitude
 
 
 def score_percent(score):
@@ -218,6 +349,36 @@ def reset_analysis():
     st.session_state.disease_results = None
 
 
+def sync_field_coordinates():
+    latitude = float(st.session_state.latitude_input)
+    longitude = float(st.session_state.longitude_input)
+    coordinates = (round(latitude, 5), round(longitude, 5))
+    st.session_state.lat = latitude
+    st.session_state.lon = longitude
+    st.session_state.last_map_click = coordinates
+    st.session_state.field_point_selected = True
+    st.session_state.location_auto_start = False
+    st.session_state.field_map_generation += 1
+    if not st.session_state.planner_point_selected:
+        st.session_state.planner_lat = latitude
+        st.session_state.planner_lon = longitude
+        st.session_state.planner_lat_input = latitude
+        st.session_state.planner_lon_input = longitude
+        st.session_state.planner_point_selected = True
+    reset_analysis()
+
+
+def sync_planner_coordinates():
+    latitude = float(st.session_state.planner_lat_input)
+    longitude = float(st.session_state.planner_lon_input)
+    st.session_state.planner_lat = latitude
+    st.session_state.planner_lon = longitude
+    st.session_state.planner_last_map_click = (round(latitude, 5), round(longitude, 5))
+    st.session_state.planner_point_selected = True
+    st.session_state.planner_map_generation += 1
+    st.session_state.crop_results = None
+
+
 def fetch_field_data(latitude, longitude, offline=False, manual=None):
     """Read the exact saved point offline, otherwise use free public sources and cache it."""
     cached = get_location_cache(latitude, longitude) if DB_READY else None
@@ -283,18 +444,41 @@ def render_voice_button(message):
     language = {"en": "en-US", "ar": "ar-SA", "zh": "zh-CN", "fr": "fr-FR", "ru": "ru-RU", "es": "es-ES"}.get(st.session_state.language, "en-US")
     safe_message = json.dumps(message, ensure_ascii=False).replace("</", "<\\/")
     components.html(
-        f"""<button type="button" aria-label="Read guidance aloud" style="
-            background:#174d38;color:white;border:0;border-radius:999px;
-            padding:10px 16px;font-size:15px;cursor:pointer">
+        f"""<button type="button" aria-label="Read guidance aloud" aria-pressed="false" style="
+            background:#174d38;color:white;border:0;border-radius:8px;
+            padding:10px 16px;font-size:15px;font-weight:600;cursor:pointer">
             Read this guidance aloud
         </button>
         <script>
         const button = document.currentScript.previousElementSibling;
+        let activeUtterance = null;
+        let isPlaying = false;
+        const idleLabel = 'Read this guidance aloud';
+        const playingLabel = 'Stop reading';
+        function setPlaying(value) {{
+          isPlaying = value;
+          button.textContent = value ? playingLabel : idleLabel;
+          button.setAttribute('aria-label', value ? playingLabel : idleLabel);
+          button.setAttribute('aria-pressed', value ? 'true' : 'false');
+        }}
         button.addEventListener('click', () => {{
-          if (!('speechSynthesis' in window)) {{ button.textContent = 'Voice playback is unavailable'; return; }}
+          if (!('speechSynthesis' in window) || !('SpeechSynthesisUtterance' in window)) {{
+            button.textContent = 'Voice playback is unavailable';
+            return;
+          }}
+          if (isPlaying) {{
+            setPlaying(false);
+            activeUtterance = null;
+            window.speechSynthesis.cancel();
+            return;
+          }}
           window.speechSynthesis.cancel();
           const utterance = new SpeechSynthesisUtterance({safe_message});
+          activeUtterance = utterance;
           utterance.lang = '{language}';
+          utterance.onend = () => {{ if (activeUtterance === utterance) setPlaying(false); }};
+          utterance.onerror = () => {{ if (activeUtterance === utterance) setPlaying(false); }};
+          setPlaying(true);
           window.speechSynthesis.speak(utterance);
         }});
         </script>""",
@@ -306,139 +490,94 @@ def render_voice_button(message):
 # CUSTOM CSS
 # ============================================================
 
-st.markdown(
-    """
+dark_theme = st.session_state.theme_mode == "Dark"
+theme = {
+    "page": "#0b0f14" if dark_theme else "#ffffff",
+    "surface": "#151b22" if dark_theme else "#f7faf8",
+    "card": "#1b232c" if dark_theme else "#ffffff",
+    "text": "#edf2f7" if dark_theme else "#18231d",
+    "muted": "#aab6c2" if dark_theme else "#5c6b62",
+    "border": "#34404c" if dark_theme else "#dce5df",
+    "accent": "#72d6b2" if dark_theme else "#176b4d",
+    "hero": "#162720" if dark_theme else "#eef8f1",
+}
+
+render_html(
+    f"""
     <style>
-
-    .block-container {
-        padding-top: 1.5rem;
-        padding-bottom: 2rem;
-        max-width: 1400px;
-    }
-
-    .hero {
-        padding: 1.5rem 1.7rem;
-        border-radius: 22px;
-        background: linear-gradient(
-            135deg,
-            #e8f5e9 0%,
-            #f7fff8 50%,
-            #e0f2f1 100%
-        );
-        border: 1px solid #c8e6c9;
-        margin-bottom: 1rem;
-    }
-
-    .hero h1 {
-        margin: 0;
-        font-size: 2.4rem;
-        font-weight: 800;
-        color: #1b4332 !important;
-    }
-
-    .hero p {
-        margin-top: 0.45rem;
-        margin-bottom: 0;
-        color: #365a43 !important;
-        font-size: 1.05rem;
-    }
-
-    .metric-card {
-        padding: 1rem;
-        border-radius: 16px;
-        border: 1px solid #e0e0e0;
-        background: white;
-        min-height: 120px;
-    }
-
-    .metric-title {
-        font-size: 0.85rem;
-        color: #666;
-        margin-bottom: 0.25rem;
-    }
-
-    .metric-value {
-        font-size: 1.55rem;
-        font-weight: 750;
-    }
-
-    .factor-card {
-        padding: 1rem;
-        border-radius: 16px;
-        border: 1px solid #e6e6e6;
-        background: #ffffff;
-        margin-bottom: 0.7rem;
-    }
-
-    .factor-title {
-        font-weight: 700;
-        font-size: 1rem;
-    }
-
-    .factor-detail {
-        color: #666;
-        font-size: 0.88rem;
-        margin-top: 0.25rem;
-    }
-
-    .success-box {
-        padding: 1.2rem;
-        border-radius: 18px;
-        background: #e8f5e9;
-        border: 1px solid #a5d6a7;
-    }
-
-    .warning-box {
-        padding: 1.2rem;
-        border-radius: 18px;
-        background: #fff8e1;
-        border: 1px solid #ffe082;
-    }
-
-    .danger-box {
-        padding: 1.2rem;
-        border-radius: 18px;
-        background: #ffebee;
-        border: 1px solid #ef9a9a;
-    }
-
-    .about-box {
-        padding: 1.2rem;
-        border-radius: 18px;
-        border: 1px solid #e5e5e5;
-        background: #ffffff;
-        margin-bottom: 1rem;
-    }
-
-    .about-title {
-        font-size: 1.2rem;
-        font-weight: 750;
-        margin-bottom: 0.7rem;
-        color: #1b4332;
-    }
-
-    .hero {
-        box-shadow: 0 12px 28px rgba(28, 78, 58, 0.08);
-    }
-
-    [data-testid="stSidebar"] {
-        background: #f5f8f2;
-    }
-
-    .feature-title {
-        color: #174d38;
-        font-weight: 750;
-        font-size: 1.05rem;
-        margin-bottom: 0.35rem;
-    }
-
-    footer {
-        visibility: hidden;
-    }
-
+    :root {{
+        color-scheme: {"dark" if dark_theme else "light"};
+        --app-page: {theme["page"]};
+        --app-surface: {theme["surface"]};
+        --app-card: {theme["card"]};
+        --app-text: {theme["text"]};
+        --app-muted: {theme["muted"]};
+        --app-border: {theme["border"]};
+        --app-accent: {theme["accent"]};
+        --app-hero: {theme["hero"]};
+    }}
+    html, body, .stApp, [data-testid="stAppViewContainer"],
+    [data-testid="stMain"], [data-testid="stHeader"],
+    [data-testid="stSidebar"], [data-testid="stBottom"] {{
+        background-color: var(--app-page) !important;
+        color: var(--app-text) !important;
+    }}
+    .stApp, [data-testid="stAppViewContainer"] {{ min-height: 100vh; }}
+    [data-testid="stMain"] > div, [data-testid="stSidebar"] > div {{
+        background-color: var(--app-page) !important;
+    }}
+    [data-testid="stSidebar"] {{ border-right: 1px solid var(--app-border); }}
+    [data-testid="stHeader"] {{ border-bottom: 1px solid var(--app-border); }}
+    [data-testid="stMarkdownContainer"], [data-testid="stMarkdownContainer"] p,
+    [data-testid="stMarkdownContainer"] li, [data-testid="stMarkdownContainer"] h1,
+    [data-testid="stMarkdownContainer"] h2, [data-testid="stMarkdownContainer"] h3,
+    [data-testid="stMarkdownContainer"] h4, [data-testid="stMarkdownContainer"] h5,
+    [data-testid="stMarkdownContainer"] h6, [data-testid="stCaptionContainer"] {{
+        color: var(--app-text) !important;
+    }}
+    [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] *,
+    [data-testid="stRadio"] label, [data-testid="stCheckbox"] label,
+    [data-testid="stSelectbox"] label, [data-testid="stNumberInput"] label {{
+        color: var(--app-text) !important;
+    }}
+    [data-testid="stCaptionContainer"] {{ opacity: 0.84; }}
+    [data-testid="stMetric"], [data-testid="stVerticalBlockBorderWrapper"] {{
+        background-color: var(--app-card) !important;
+        border-color: var(--app-border) !important;
+    }}
+    [data-testid="stMetricLabel"], [data-testid="stMetricValue"] {{ color: var(--app-text) !important; }}
+    input, textarea, [data-baseweb="select"] > div,
+    [data-baseweb="input"] > div, [data-baseweb="textarea"] > div {{
+        background-color: var(--app-card) !important;
+        color: var(--app-text) !important;
+        border-color: var(--app-border) !important;
+    }}
+    [data-testid="stExpander"] {{
+        background-color: var(--app-card) !important;
+        border-color: var(--app-border) !important;
+    }}
+    [data-testid="stAlert"] {{ background-color: var(--app-surface) !important; }}
+    [data-testid="stAlert"] *, [data-testid="stExpander"] * {{ color: var(--app-text) !important; }}
+    [data-testid="stBaseButton-secondary"] {{
+        background-color: var(--app-surface) !important;
+        color: var(--app-text) !important;
+        border-color: var(--app-border) !important;
+    }}
+    [data-testid="stBaseButton-primary"] {{ background-color: var(--app-accent) !important; color: #ffffff !important; }}
+    .block-container {{ padding-top: 1.5rem; padding-bottom: 2rem; max-width: 1400px; }}
+    .hero {{
+        padding: 1.3rem 1.5rem; border-radius: 18px;
+        background: var(--app-hero); border: 1px solid var(--app-border);
+        margin-bottom: 1rem; color: var(--app-text);
+    }}
+    .hero h1 {{ margin: 0; font-size: 2.25rem; font-weight: 800; color: var(--app-text) !important; }}
+    .hero p {{ margin: .4rem 0 0; color: var(--app-muted) !important; font-size: 1.02rem; }}
+    .about-box {{ padding: 1.2rem; border-radius: 16px; border: 1px solid var(--app-border); background: var(--app-card); margin-bottom: 1rem; }}
+    .about-title {{ font-size: 1.2rem; font-weight: 750; margin-bottom: .7rem; color: var(--app-accent); }}
+    .feature-title {{ color: var(--app-accent); font-weight: 750; font-size: 1.05rem; margin-bottom: .35rem; }}
+    footer {{ visibility: hidden; }}
     </style>
-    """,
-    unsafe_allow_html=True,
+    """
 )
 
 
@@ -458,23 +597,14 @@ with st.sidebar:
     st.session_state.language = LANGUAGES[selected_language]
     language = st.session_state.language
 
-    st.markdown(
-        f"""
-        <div style="
-            text-align:center;
-            padding:0.5rem 0 1rem 0;
-        ">
-            <div style="font-size:3rem;">🌱</div>
-            <h2 style="margin:0;">CropWise</h2>
-            <p style="color:#777;margin-top:0.2rem;">
-                {safe_text(tr("tagline", language))}
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), width=104)
+    st.markdown("## CropWise")
+    st.caption(tr("tagline", language))
 
     st.divider()
+
+    st.selectbox("Appearance", ["Light", "Dark"], key="theme_mode")
 
     st.markdown(f"### {safe_text(tr('nav', language))}")
 
@@ -494,6 +624,7 @@ with st.sidebar:
 
             if st.session_state.page != sidebar_page:
                 st.session_state.page = sidebar_page
+                st.session_state.page_navigation = sidebar_page
                 st.rerun()
 
     st.divider()
@@ -505,29 +636,49 @@ with st.sidebar:
     )
 
     with st.expander(tr("account", language)):
-        if not DB_READY:
-            st.warning("Local account storage could not be opened on this installation.")
-        elif st.session_state.username:
-            st.success(f"{tr('account', language)}: {safe_text(st.session_state.username)}")
+        if st.session_state.username:
+            account_label = st.session_state.display_name or st.session_state.username
+            st.success(f"Signed in as {safe_text(account_label)}")
             if st.button(tr("logout", language), use_container_width=True):
+                use_google_logout = st.session_state.auth_provider == "google"
                 st.session_state.username = None
-                st.rerun()
+                st.session_state.display_name = None
+                st.session_state.auth_provider = None
+                if use_google_logout:
+                    st.logout()
+                else:
+                    st.rerun()
         else:
-            login_tab, register_tab = st.tabs([tr("sign_in", language), tr("register", language)])
-            with login_tab:
-                login_name = st.text_input(tr("username", language), key="login_username")
-                login_password = st.text_input(tr("password", language), type="password", key="login_password")
-                if st.button(tr("sign_in", language), key="sign_in_button", use_container_width=True):
-                    if authenticate(login_name, login_password):
-                        st.session_state.username = login_name.strip()
-                        st.rerun()
-                    st.error("The username or password was not recognized.")
-            with register_tab:
-                new_name = st.text_input(tr("username", language), key="register_username")
-                new_password = st.text_input(tr("password", language), type="password", key="register_password")
-                if st.button(tr("register", language), key="register_button", use_container_width=True):
-                    created, message = create_user(new_name, new_password)
-                    (st.success if created else st.error)(message)
+            if st.button(
+                "Sign in with Google",
+                key="google_sign_in_button",
+                use_container_width=True,
+                disabled=not GOOGLE_LOGIN_CONFIGURED,
+            ):
+                st.login()
+            if not GOOGLE_LOGIN_CONFIGURED:
+                st.caption("Google sign-in needs OAuth details in Streamlit secrets. Setup steps are in the README.")
+
+            if not DB_READY:
+                st.warning("Local account storage could not be opened on this installation.")
+            else:
+                login_tab, register_tab = st.tabs([tr("sign_in", language), tr("register", language)])
+                with login_tab:
+                    login_name = st.text_input(tr("username", language), key="login_username")
+                    login_password = st.text_input(tr("password", language), type="password", key="login_password")
+                    if st.button(tr("sign_in", language), key="sign_in_button", use_container_width=True):
+                        if authenticate(login_name, login_password):
+                            st.session_state.username = login_name.strip()
+                            st.session_state.display_name = login_name.strip()
+                            st.session_state.auth_provider = "local"
+                            st.rerun()
+                        st.error("The username or password was not recognized.")
+                with register_tab:
+                    new_name = st.text_input(tr("username", language), key="register_username")
+                    new_password = st.text_input(tr("password", language), type="password", key="register_password")
+                    if st.button(tr("register", language), key="register_button", use_container_width=True):
+                        created, message = create_user(new_name, new_password)
+                        (st.success if created else st.error)(message)
             st.caption("A local database stores a salted password hash and saved activity. Hosted retention depends on the deployment's storage.")
 
     st.caption(
@@ -540,18 +691,20 @@ with st.sidebar:
 # HERO
 # ============================================================
 
-st.markdown(
-    f"""
-    <div class="hero">
-        <h1>🌱 CropWise</h1>
-        <p>
-            {safe_text(tr("tagline", language))}<br>
-            <span style="font-size:0.92rem">{safe_text(tr("problem", language))}</span>
-        </p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+hero_logo, hero_copy = st.columns([0.12, 0.88], vertical_alignment="center")
+with hero_logo:
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), width=68)
+with hero_copy:
+    render_html(
+        f"""
+        <div class="hero">
+            <h1>CropWise</h1>
+            <p>{safe_text(tr("tagline", language))}<br>
+            <span>{safe_text(tr("problem", language))}</span></p>
+        </div>
+        """
+    )
 
 feature_columns = st.columns(3)
 feature_copy = [
@@ -570,15 +723,14 @@ render_voice_button(". ".join(tr(key, language) for key in ("problem", "map_intr
 # TOP NAVIGATION
 # ============================================================
 
-page_labels = [tr(page_key, language) for page_key in PAGES]
-page_label = st.radio(
+page = st.radio(
     tr("nav", language),
-    page_labels,
-    index=PAGES.index(st.session_state.page),
+    PAGES,
+    format_func=lambda page_key: tr(page_key, language),
     horizontal=True,
     label_visibility="collapsed",
+    key="page_navigation",
 )
-page = PAGES[page_labels.index(page_label)]
 
 if page != st.session_state.page:
     st.session_state.page = page
@@ -604,15 +756,18 @@ if st.session_state.page == "map":
 
         st.markdown("#### Select a location")
 
+        field_map_location = (
+            [st.session_state.lat, st.session_state.lon]
+            if st.session_state.field_point_selected
+            else [20.0, 0.0]
+        )
         m = folium.Map(
-            location=[
-                st.session_state.lat,
-                st.session_state.lon,
-            ],
-            zoom_start=11,
+            location=field_map_location,
+            zoom_start=11 if st.session_state.field_point_selected else 2,
             tiles=None if st.session_state.offline_mode else "OpenStreetMap",
             control_scale=True,
         )
+        add_location_controls(m, auto_start=st.session_state.location_auto_start)
 
         leaf_html = """
         <div style="
@@ -668,57 +823,62 @@ if st.session_state.page == "map":
         </div>
         """
 
-        folium.Marker(
-            [
-                st.session_state.lat,
-                st.session_state.lon,
-            ],
-            tooltip="Selected location",
-            icon=folium.DivIcon(
-                html=leaf_html
-            ),
-        ).add_to(m)
+        if st.session_state.field_point_selected:
+            folium.Marker(
+                [st.session_state.lat, st.session_state.lon],
+                tooltip="Selected location",
+                icon=folium.DivIcon(html=leaf_html),
+            ).add_to(m)
 
         map_data = st_folium(
             m,
             height=470,
             width=None,
             returned_objects=["last_clicked"],
-            key="cropwise_map",
+            key=f"cropwise_map_{st.session_state.field_map_generation}",
         )
 
-        if map_data and map_data.get("last_clicked"):
+        selected_coordinates = get_location_coordinates(map_data)
+        if selected_coordinates and st.session_state.last_map_click != selected_coordinates:
+            new_lat, new_lon = selected_coordinates
+            st.session_state.last_map_click = selected_coordinates
+            st.session_state.lat = new_lat
+            st.session_state.lon = new_lon
+            st.session_state.latitude_input = new_lat
+            st.session_state.longitude_input = new_lon
+            st.session_state.field_point_selected = True
+            st.session_state.location_auto_start = False
+            st.session_state.field_map_generation += 1
+            if not st.session_state.planner_point_selected:
+                st.session_state.planner_lat = new_lat
+                st.session_state.planner_lon = new_lon
+                st.session_state.planner_lat_input = new_lat
+                st.session_state.planner_lon_input = new_lon
+                st.session_state.planner_point_selected = True
+            reset_analysis()
+            st.rerun()
 
-            clicked = map_data["last_clicked"]
+        if st.session_state.field_point_selected:
+            st.caption(f"Selected point: {st.session_state.lat:.5f}, {st.session_state.lon:.5f}")
+        else:
+            st.caption("The map will request your location. You can also zoom in and select any point.")
 
-            new_lat = round(
-                float(clicked["lat"]),
-                5,
-            )
-
-            new_lon = round(
-                float(clicked["lng"]),
-                5,
-            )
-
-            click_key = (
-                new_lat,
-                new_lon,
-            )
-
-            if st.session_state.last_map_click != click_key:
-
-                st.session_state.last_map_click = click_key
-
-                st.session_state.lat = new_lat
-                st.session_state.lon = new_lon
-
-                st.session_state.latitude_input = new_lat
-                st.session_state.longitude_input = new_lon
-
-                reset_analysis()
-
-                st.rerun()
+        if st.button(
+            "Clear selected point",
+            key="clear_field_point",
+            use_container_width=True,
+            disabled=not st.session_state.field_point_selected,
+        ):
+            st.session_state.field_point_selected = False
+            st.session_state.location_auto_start = False
+            st.session_state.field_map_generation += 1
+            st.session_state.last_map_click = None
+            st.session_state.lat = DEFAULT_LAT
+            st.session_state.lon = DEFAULT_LON
+            st.session_state.latitude_input = DEFAULT_LAT
+            st.session_state.longitude_input = DEFAULT_LON
+            reset_analysis()
+            st.rerun()
 
     # ========================================================
     # LOCATION CONTROLS
@@ -735,6 +895,7 @@ if st.session_state.page == "map":
             step=0.0001,
             format="%.5f",
             key="latitude_input",
+            on_change=sync_field_coordinates,
         )
 
         longitude = st.number_input(
@@ -744,13 +905,14 @@ if st.session_state.page == "map":
             step=0.0001,
             format="%.5f",
             key="longitude_input",
+            on_change=sync_field_coordinates,
         )
 
         st.session_state.lat = latitude
         st.session_state.lon = longitude
 
         st.caption(
-            "Click anywhere on the map or enter coordinates manually."
+            "Click anywhere on the map or enter coordinates manually. Browser location is requested on the field map and can be denied at any time."
         )
 
         with st.expander("Enter local climate and soil values", expanded=st.session_state.offline_mode):
@@ -782,6 +944,9 @@ if st.session_state.page == "map":
             st.session_state.longitude_input = DEFAULT_LON
 
             st.session_state.last_map_click = None
+            st.session_state.field_point_selected = False
+            st.session_state.location_auto_start = False
+            st.session_state.field_map_generation += 1
 
             reset_analysis()
 
@@ -865,6 +1030,7 @@ if st.session_state.page == "map":
             tr("analyze", language),
             type="primary",
             use_container_width=True,
+            disabled=not st.session_state.field_point_selected,
         ):
 
             with st.spinner(
@@ -943,39 +1109,14 @@ if st.session_state.page == "map":
         verdict = analysis["verdict"]
         score = analysis["score"]
 
-        if verdict == "Suitable":
-            box_class = "success-box"
-
-        elif verdict == "Marginal":
-            box_class = "warning-box"
-
-        elif verdict == "Not suitable":
-            box_class = "danger-box"
-
-        else:
-            box_class = "warning-box"
-
-        st.markdown(
-            f"""
-            <div class="{box_class}">
-                <h2 style="margin:0;">
-                    {safe_text(verdict)}
-                </h2>
-
-                <p style="
-                    margin-top:0.5rem;
-                    margin-bottom:0;
-                    font-size:1.1rem;
-                ">
-                    Suitability score:
-                    <strong>
-                        {score_percent(score)}%
-                    </strong>
-                </p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        with st.container(border=True):
+            if verdict == "Suitable":
+                st.success(verdict)
+            elif verdict == "Not suitable":
+                st.error(verdict)
+            else:
+                st.warning(verdict)
+            st.metric("Suitability score", f"{score_percent(score)}%")
 
         st.subheader("Plain-language summary")
         st.write(
@@ -987,87 +1128,16 @@ if st.session_state.page == "map":
             )
         )
 
-        st.markdown("")
-
         climate = analysis["climate"]
         soil = analysis["soil"]
 
         c1, c2, c3 = st.columns(3)
-
-        with c1:
-
-            temp = climate.get("temp_c")
-
-            st.markdown(
-                f"""
-                <div class="metric-card">
-
-                    <div class="metric-title">
-                        Average temperature
-                    </div>
-
-                    <div class="metric-value">
-                        {
-                            f"{temp:.1f} °C"
-                            if temp is not None
-                            else "Unavailable"
-                        }
-                    </div>
-
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-        with c2:
-
-            rain = climate.get("rain_mm_year")
-
-            st.markdown(
-                f"""
-                <div class="metric-card">
-
-                    <div class="metric-title">
-                        Annual rainfall
-                    </div>
-
-                    <div class="metric-value">
-                        {
-                            f"{rain:,.0f} mm"
-                            if rain is not None
-                            else "Unavailable"
-                        }
-                    </div>
-
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-        with c3:
-
-            ph = soil.get("ph")
-
-            st.markdown(
-                f"""
-                <div class="metric-card">
-
-                    <div class="metric-title">
-                        Soil pH
-                    </div>
-
-                    <div class="metric-value">
-                        {
-                            f"{ph:.2f}"
-                            if ph is not None
-                            else "Unavailable"
-                        }
-                    </div>
-
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+        temp = climate.get("temp_c")
+        rain = climate.get("rain_mm_year")
+        ph = soil.get("ph")
+        c1.metric("Average temperature", f"{temp:.1f} °C" if temp is not None else "Unavailable")
+        c2.metric("Annual rainfall", f"{rain:,.0f} mm" if rain is not None else "Unavailable")
+        c3.metric("Soil pH", f"{ph:.2f}" if ph is not None else "Unavailable")
 
         terrain1, terrain2 = st.columns(2)
         with terrain1:
@@ -1093,60 +1163,23 @@ if st.session_state.page == "map":
 
             status = factor_status(score_value)
 
-            st.markdown(
-                f"""
-                <div class="factor-card">
-
-                    <div style="
-                        display:flex;
-                        justify-content:space-between;
-                        align-items:center;
-                    ">
-
-                        <div class="factor-title">
-                            {safe_text(factor_name)}
-                        </div>
-
-                        <div>
-                            <strong>
-                                {score_percent(score_value)}%
-                            </strong>
-
-                            &nbsp;•&nbsp; {safe_text(status)}
-                        </div>
-
-                    </div>
-
-                    <div class="factor-detail">
-
-                        Actual:
-                        <strong>
-                            {safe_text(
-                                format_factor_value(
-                                    value,
-                                    unit
-                                )
-                            )}
-                        </strong>
-
-                        &nbsp; | &nbsp;
-
-                        Preferred:
-                        <strong>
-                            {low:g}–{high:g} {safe_text(unit)}
-                        </strong>
-
-                    </div>
-
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+            with st.container(border=True):
+                factor_col, score_col = st.columns([3, 1])
+                with factor_col:
+                    st.markdown(f"**{factor_name}**")
+                    st.caption(
+                        f"Observed: {format_factor_value(value, unit)}  ·  "
+                        f"Preferred: {low:g}–{high:g} {unit}  ·  {status}"
+                    )
+                with score_col:
+                    st.metric("Screening fit", f"{score_percent(score_value)}%")
+                if score_value is not None:
+                    st.progress(max(0.0, min(1.0, float(score_value))))
 
         st.subheader("Why this result")
 
         for reason in analysis["reasons"]:
-            st.write("•", reason)
+            st.write(f"- {reason}")
 
         if climate.get("error"):
             st.warning(climate["error"])
@@ -1169,36 +1202,87 @@ elif st.session_state.page == "planner":
     st.write(tr("planner_intro", language))
     st.caption("Start with a field assessment to compare suitable crops, then build a companion plan from the screened pairings.")
 
-    c1, c2 = st.columns(2)
+    st.markdown("#### Select a point on the planting map")
+    planner_map_center = (
+        [st.session_state.planner_lat, st.session_state.planner_lon]
+        if st.session_state.planner_point_selected
+        else [20.0, 0.0]
+    )
+    planner_map = folium.Map(
+        location=planner_map_center,
+        zoom_start=11 if st.session_state.planner_point_selected else 2,
+        tiles=None if st.session_state.offline_mode else "OpenStreetMap",
+        control_scale=True,
+    )
+    add_location_controls(planner_map)
+    if st.session_state.planner_point_selected:
+        folium.Marker(
+            [st.session_state.planner_lat, st.session_state.planner_lon],
+            tooltip="Selected planting point",
+        ).add_to(planner_map)
 
-    with c1:
+    planner_map_data = st_folium(
+        planner_map,
+        height=430,
+        width=None,
+        returned_objects=["last_clicked"],
+        key=f"cropwise_planner_map_{st.session_state.planner_map_generation}",
+    )
+    planner_coordinates = get_location_coordinates(planner_map_data)
+    if planner_coordinates and st.session_state.planner_last_map_click != planner_coordinates:
+        st.session_state.planner_last_map_click = planner_coordinates
+        st.session_state.planner_lat, st.session_state.planner_lon = planner_coordinates
+        st.session_state.planner_lat_input = planner_coordinates[0]
+        st.session_state.planner_lon_input = planner_coordinates[1]
+        st.session_state.planner_point_selected = True
+        st.session_state.planner_map_generation += 1
+        st.session_state.crop_results = None
+        st.rerun()
 
-        finder_lat = st.number_input(
-            "Latitude",
-            min_value=-90.0,
-            max_value=90.0,
-            step=0.0001,
-            format="%.5f",
-            value=float(st.session_state.lat),
-            key="finder_lat",
+    if st.session_state.planner_point_selected:
+        st.caption(
+            f"Selected point: {st.session_state.planner_lat:.5f}, "
+            f"{st.session_state.planner_lon:.5f}"
         )
+    else:
+        st.caption("Zoom and click the map to choose a planting location, or use your device location control.")
 
-    with c2:
+    if st.button(
+        "Clear selected point",
+        key="clear_planner_point",
+        use_container_width=True,
+        disabled=not st.session_state.planner_point_selected,
+    ):
+        st.session_state.planner_point_selected = False
+        st.session_state.planner_map_generation += 1
+        st.session_state.planner_last_map_click = None
+        st.session_state.planner_lat = DEFAULT_LAT
+        st.session_state.planner_lon = DEFAULT_LON
+        st.session_state.planner_lat_input = DEFAULT_LAT
+        st.session_state.planner_lon_input = DEFAULT_LON
+        st.session_state.crop_results = None
+        st.rerun()
 
-        finder_lon = st.number_input(
-            "Longitude",
-            min_value=-180.0,
-            max_value=180.0,
-            step=0.0001,
-            format="%.5f",
-            value=float(st.session_state.lon),
-            key="finder_lon",
-        )
+    with st.expander("Enter planting coordinates manually"):
+        c1, c2 = st.columns(2)
+        with c1:
+            finder_lat = st.number_input(
+                "Latitude", min_value=-90.0, max_value=90.0, step=0.0001,
+                format="%.5f", value=float(st.session_state.planner_lat), key="planner_lat_input",
+                on_change=sync_planner_coordinates,
+            )
+        with c2:
+            finder_lon = st.number_input(
+                "Longitude", min_value=-180.0, max_value=180.0, step=0.0001,
+                format="%.5f", value=float(st.session_state.planner_lon), key="planner_lon_input",
+                on_change=sync_planner_coordinates,
+            )
 
     if st.button(
         tr("find_crops", language),
         type="primary",
         use_container_width=True,
+        disabled=not st.session_state.planner_point_selected,
     ):
 
         with st.spinner(
@@ -1302,44 +1386,15 @@ elif st.session_state.page == "planner":
                     result["score"]
                 )
 
-                st.markdown(
-                    f"""
-                    <div class="factor-card">
-
-                        <div style="
-                            display:flex;
-                            justify-content:space-between;
-                            align-items:center;
-                        ">
-
-                            <div>
-
-                                <strong>
-                                    {safe_text(result["crop"])}
-                                </strong>
-
-                                <div class="factor-detail">
-
-                                    {safe_text(result["verdict"])}
-
-                                </div>
-
-                            </div>
-
-                            <div>
-
-                                <strong>
-                                    {score}%
-                                </strong>
-
-                            </div>
-
-                        </div>
-
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                with st.container(border=True):
+                    crop_col, score_col = st.columns([3, 1])
+                    with crop_col:
+                        st.markdown(f"**{result['crop']}**")
+                        st.caption(result["verdict"])
+                    with score_col:
+                        st.metric("Screening fit", f"{score}%")
+                    if result.get("score") is not None:
+                        st.progress(max(0.0, min(1.0, float(result["score"]))))
 
             st.divider()
             st.subheader("Companion planting plan")

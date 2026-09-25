@@ -508,6 +508,37 @@ CROP_THRESHOLDS = {
         "ph": (4.5, 5.5),
         "notes": "Prefers warm, humid climates and strongly acidic, well-drained soils."
     },
+
+    # Broad screening bands for additional crops. Cultivar and local conditions vary.
+    "Adzuki Bean": {"temp_c": (16, 30), "rain_mm": (500, 1000), "ph": (5.5, 7.5), "notes": "Warm-season pulse that needs a frost-free period and well-drained soil."},
+    "Amaranth": {"temp_c": (18, 32), "rain_mm": (400, 1000), "ph": (5.5, 7.5), "notes": "Heat-tolerant grain and leafy crop; avoid waterlogged soil."},
+    "Asparagus": {"temp_c": (12, 25), "rain_mm": (400, 900), "ph": (6.0, 7.5), "notes": "Perennial crop best suited to well-drained beds and a long-term planting site."},
+    "Avocado": {"temp_c": (16, 30), "rain_mm": (1000, 2000), "ph": (5.0, 7.0), "notes": "Warm-climate tree that needs excellent drainage and protection from frost."},
+    "Brussels Sprouts": {"temp_c": (10, 24), "rain_mm": (500, 900), "ph": (6.0, 7.5), "notes": "Cool-season brassica that benefits from steady moisture and mild weather."},
+    "Buckwheat": {"temp_c": (12, 26), "rain_mm": (400, 800), "ph": (5.0, 7.0), "notes": "Short-season grain that grows quickly and is sensitive to heat during flowering."},
+    "Canola": {"temp_c": (8, 25), "rain_mm": (350, 800), "ph": (5.5, 7.5), "notes": "Cool-season oilseed; variety and planting date affect heat tolerance."},
+    "Cassava": {"temp_c": (20, 32), "rain_mm": (800, 2000), "ph": (5.0, 7.0), "notes": "Tropical root crop with some drought tolerance once established; avoid waterlogging."},
+    "Celery": {"temp_c": (15, 23), "rain_mm": (700, 1200), "ph": (6.0, 7.0), "notes": "Cool-season crop with high, consistent moisture needs."},
+    "Chia": {"temp_c": (18, 30), "rain_mm": (400, 900), "ph": (5.5, 8.0), "notes": "Warm-season seed crop; day length can affect flowering."},
+    "Cowpea": {"temp_c": (20, 35), "rain_mm": (600, 1500), "ph": (5.5, 7.5), "notes": "Warm-season legume. FAO EcoCrop lists broad adaptation across rainfall and soil types."},
+    "Fava Bean": {"temp_c": (8, 24), "rain_mm": (400, 800), "ph": (6.0, 7.5), "notes": "Cool-season pulse that performs best without prolonged heat during flowering."},
+    "Fig": {"temp_c": (15, 35), "rain_mm": (300, 800), "ph": (6.0, 8.0), "notes": "Warm-climate fruit tree with good drought tolerance once established."},
+    "Guava": {"temp_c": (20, 32), "rain_mm": (800, 2000), "ph": (4.5, 7.5), "notes": "Adaptable tropical and subtropical fruit tree; young trees need reliable moisture."},
+    "Jackfruit": {"temp_c": (24, 35), "rain_mm": (1000, 2400), "ph": (5.5, 7.5), "notes": "Tropical tree crop that needs warmth, moisture, and a frost-free site."},
+    "Kale": {"temp_c": (8, 24), "rain_mm": (400, 900), "ph": (6.0, 7.5), "notes": "Hardy leafy brassica that grows best in cool conditions."},
+    "Leek": {"temp_c": (10, 24), "rain_mm": (400, 900), "ph": (6.0, 7.5), "notes": "Cool-season allium that needs steady moisture and fertile, loose soil."},
+    "Lime": {"temp_c": (18, 32), "rain_mm": (800, 1800), "ph": (5.5, 7.5), "notes": "Warm-climate citrus that needs drainage and protection from frost."},
+    "Olive": {"temp_c": (15, 30), "rain_mm": (300, 800), "ph": (6.0, 8.0), "notes": "Mediterranean tree crop adapted to dry summers and well-drained soils."},
+    "Parsnip": {"temp_c": (8, 22), "rain_mm": (350, 800), "ph": (6.0, 7.5), "notes": "Cool-season root crop that needs deep, stone-free soil."},
+    "Pigeon Pea": {"temp_c": (18, 35), "rain_mm": (600, 1200), "ph": (5.0, 7.5), "notes": "Warm-season legume with useful drought tolerance after establishment."},
+    "Plantain": {"temp_c": (20, 35), "rain_mm": (1200, 2500), "ph": (5.5, 7.5), "notes": "Warm, moisture-demanding banana relative; good drainage is important."},
+    "Rutabaga": {"temp_c": (8, 22), "rain_mm": (400, 800), "ph": (6.0, 7.5), "notes": "Cool-season root crop that develops best with steady moisture."},
+    "Shallot": {"temp_c": (10, 25), "rain_mm": (350, 750), "ph": (5.5, 7.5), "notes": "Allium crop requiring well-drained soil; excess moisture can cause rot."},
+    "Swiss Chard": {"temp_c": (10, 28), "rain_mm": (400, 900), "ph": (6.0, 7.5), "notes": "Leafy vegetable that tolerates a wider temperature range than many greens."},
+    "Taro": {"temp_c": (21, 32), "rain_mm": (1200, 2500), "ph": (5.0, 7.0), "notes": "Tropical root crop with high moisture needs; water systems vary by cultivar."},
+    "Teff": {"temp_c": (10, 27), "rain_mm": (400, 900), "ph": (5.5, 7.5), "notes": "Small-grain cereal grown across varied elevations; confirm local cultivar ranges."},
+    "Yam": {"temp_c": (20, 32), "rain_mm": (1000, 1800), "ph": (5.5, 7.5), "notes": "Tropical tuber crop that needs a warm, long growing season and well-drained soil."},
+    "Zucchini": {"temp_c": (18, 32), "rain_mm": (450, 900), "ph": (6.0, 7.5), "notes": "Warm-season squash that needs regular moisture and frost-free conditions."},
 }
 
 

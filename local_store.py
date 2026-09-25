@@ -98,6 +98,21 @@ def authenticate(username: str, password: str) -> bool:
     return hmac.compare_digest(candidate, row["password_hash"])
 
 
+def ensure_external_user(username: str) -> None:
+    """Create a history owner for an identity-provider user without a usable password."""
+    username = username.strip()
+    if not USERNAME_RE.fullmatch(username):
+        raise ValueError("External account identifier is invalid.")
+    salt = secrets.token_bytes(16)
+    random_password = secrets.token_bytes(32)
+    password_hash = hashlib.pbkdf2_hmac("sha256", random_password, salt, PBKDF2_ROUNDS)
+    with _connect() as db:
+        db.execute(
+            "INSERT OR IGNORE INTO users(username, salt, password_hash, created_at) VALUES (?, ?, ?, ?)",
+            (username, salt.hex(), password_hash.hex(), _now()),
+        )
+
+
 def record_history(
     username: str,
     entry_type: str,
